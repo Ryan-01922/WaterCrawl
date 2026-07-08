@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NHSA Crawler - 测试页面</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #333; padding: 20px; }
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
+.card { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.card h2 { font-size: 18px; margin-bottom: 12px; color: #1a1a2e; }
+.config-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.config-row label { font-weight: 600; min-width: 100px; line-height: 36px; }
+.config-row input { flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+.btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; transition: opacity 0.2s; }
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: #4361ee; color: #fff; }
+.btn-success { background: #2ecc71; color: #fff; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 12px; border-radius: 8px; }
+.status-idle { background: #e8f4fd; color: #2196F3; }
+.status-running { background: #fff3e0; color: #ff9800; }
+.status-finished { background: #e8f5e9; color: #4caf50; }
+.status-failed { background: #fbe9e7; color: #f44336; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot-idle { background: #2196F3; }
+.dot-running { background: #ff9800; animation: pulse 1s infinite; }
+.dot-finished { background: #4caf50; }
+.dot-failed { background: #f44336; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.tab { padding: 8px 16px; border: 1px solid #ddd; border-radius: 6px; background: #fff; cursor: pointer; font-size: 14px; }
+.tab.active { background: #4361ee; color: #fff; border-color: #4361ee; }
+.article-list { list-style: none; }
+.article-item { border-bottom: 1px solid #eee; padding: 12px 0; }
+.article-item:last-child { border-bottom: none; }
+.article-title { font-weight: 600; margin-bottom: 4px; }
+.article-url { font-size: 12px; color: #888; word-break: break-all; }
+.article-content { margin-top: 8px; padding: 12px; background: #f9f9f9; border-radius: 6px; font-size: 13px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #ccc; border-top-color: #333; border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>&#x1F577;&#xFE0F; NHSA Crawler - 测试页面</h1>
+
+  <div class="card">
+    <h2>&#x2699;&#xFE0F; 配置</h2>
+    <div class="config-row">
+      <label>WaterCrawl API:</label>
+      <input id="baseUrl" value="http://10.60.151.130:80/api/v1/core" placeholder="http://10.60.151.130:80/api/v1/core">
+    </div>
+    <div class="config-row">
+      <label>API Key:</label>
+      <input id="apiKey" type="password" placeholder="输入 WaterCrawl API Key">
+    </div>
+    <p style="font-size:12px;color:#888">提示：此处仅用于显示，实际环境变量请在 docker-compose.yml 中配置。</p>
+  </div>
+
+  <div class="card">
+    <h2>&#x1F680; 操作</h2>
+    <div id="statusBar" class="status-bar status-idle">
+      <span id="statusDot" class="status-dot dot-idle"></span>
+      <span id="statusText">就绪</span>
+      <span id="progressText" style="margin-left:12px;font-size:13px;"></span>
+    </div>
+    <div style="display:flex;gap:12px;">
+      <button class="btn btn-primary" id="btnCrawlAll" onclick="startCrawl()">&#x1F680; 爬取全部三个栏目</button>
+      <button class="btn btn-danger" id="btnRefresh" onclick="refreshStatus()">&#x1F504; 刷新状态</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>&#x1F4CA; 结果</h2>
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('all', this)">全部</button>
+      <button class="tab" onclick="switchTab('yibao_zhengce', this)">医保政策</button>
+      <button class="tab" onclick="switchTab('dongtai', this)">动态</button>
+      <button class="tab" onclick="switchTab('tongji_shuju', this)">统计数据</button>
+    </div>
+    <div id="resultsArea">
+      <p style="color:#888;">点击"爬取全部三个栏目"开始，或点击"刷新状态"查看进度</p>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentTab = 'all';
+let pollTimer = null;
+
+const STATUS_LABELS = { idle: '就绪', running: '运行中', finished: '已完成', failed: '失败' };
+
+async function startCrawl() {
+  const btn = document.getElementById('btnCrawlAll');
+  btn.disabled = true;
+  btn.textContent = '⏳ 启动中...';
+  try {
+    const resp = await fetch('/api/crawl', { method: 'POST' });
+    const data = await resp.json();
+    if (resp.status === 409) {
+      alert('爬取任务已在运行中，请等待完成');
+      btn.disabled = false;
+      btn.textContent = '🚀 爬取全部三个栏目';
+      return;
+    }
+    startPolling();
+  } catch(e) {
+    alert('启动失败: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '🚀 爬取全部三个栏目';
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refreshStatus, 3000);
+  refreshStatus();
+}
+
+async function refreshStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    updateStatusBar(data.status, data.progress);
+
+    const btn = document.getElementById('btnCrawlAll');
+    if (data.status === 'running') {
+      btn.disabled = true;
+      btn.textContent = '⏳ 爬取中...';
+      if (!pollTimer) startPolling();
+    } else {
+      btn.disabled = false;
+      btn.textContent = '🚀 爬取全部三个栏目';
+      if (pollTimer && data.status !== 'running') {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    if (data.status === 'finished' || data.status === 'failed') {
+      await loadResults();
+    }
+  } catch(e) {
+    console.error('刷新状态失败:', e);
+  }
+}
+
+function updateStatusBar(status, progress) {
+  const bar = document.getElementById('statusBar');
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const prog = document.getElementById('progressText');
+
+  bar.className = 'status-bar status-' + status;
+  dot.className = 'status-dot dot-' + status;
+  text.textContent = STATUS_LABELS[status] || status;
+  prog.textContent = progress || '';
+}
+
+async function loadResults() {
+  const section = currentTab === 'all' ? '' : currentTab;
+  const url = section ? '/api/results?section=' + section : '/api/results';
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    renderResults(data.results, section);
+  } catch(e) {
+    document.getElementById('resultsArea').innerHTML = '<p style="color:red;">加载结果失败: ' + e.message + '</p>';
+  }
+}
+
+function renderResults(results, section) {
+  const area = document.getElementById('resultsArea');
+  if (!results) {
+    area.innerHTML = '<p style="color:#888;">暂无结果，请先启动爬取</p>';
+    return;
+  }
+
+  if (section) {
+    const label = { yibao_zhengce: '医保政策', dongtai: '动态', tongji_shuju: '统计数据' }[section] || section;
+    let html = '<h3 style="margin:16px 0 8px;color:#1a1a2e;">📌 ' + label + '（' + results.length + ' 篇）</h3>';
+    html += renderArticles(results);
+    area.innerHTML = html;
+  } else {
+    let html = '';
+    for (const [key, articles] of Object.entries(results)) {
+      const label = { yibao_zhengce: '医保政策', dongtai: '动态', tongji_shuju: '统计数据' }[key] || key;
+      html += '<h3 style="margin:16px 0 8px;color:#1a1a2e;">📌 ' + label + '（' + articles.length + ' 篇）</h3>';
+      html += renderArticles(articles);
+    }
+    area.innerHTML = html || '<p style="color:#888;">暂无结果</p>';
+  }
+}
+
+function renderArticles(articles) {
+  if (!articles || articles.length === 0) return '<p style="color:#888;">暂无文章</p>';
+  let html = '<ul class="article-list">';
+  for (const a of articles) {
+    html += '<li class="article-item">';
+    html += '<div class="article-title">' + escapeHtml(a.title || '无标题') + '</div>';
+    html += '<div class="article-url">' + escapeHtml(a.url || '') + '</div>';
+    if (a.content && a.content.result) {
+      const inner = a.content.result;
+      let text = '';
+      if (typeof inner === 'string') {
+        text = inner;
+      } else if (inner.markdown) {
+        text = inner.markdown;
+      } else if (inner.html) {
+        text = inner.html.replace(/<[^>]*>/g, '').trim();
+      } else {
+        text = JSON.stringify(inner);
+      }
+      html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看内容</summary>';
+      html += '<div class="article-content">' + escapeHtml(text).substring(0, 3000) + '</div></details>';
+    }
+    html += '</li>';
+  }
+  html += '</ul>';
+  return html;
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function switchTab(tab, btn) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  loadResults();
+}
+
+refreshStatus();
+</script>
+</body>
+</html>
