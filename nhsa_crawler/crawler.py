@@ -28,6 +28,10 @@ WATERCRAWL_BASE_URL = os.getenv(
 )
 WATERCRAWL_API_KEY = os.getenv("WATERCRAWL_API_KEY", "")
 
+# 从 WaterCrawl base URL 提取主机地址，用于替换 MinIO result URL 中的 localhost
+# 例: "http://10.60.151.130:7109/api/v1/core" → "http://10.60.151.130:7109"
+WATERCRAWL_HOST = WATERCRAWL_BASE_URL.replace("/api/v1/core", "").rstrip("/")
+
 GPUSTACK_API_BASE = os.getenv(
     "GPUSTACK_API_BASE", "https://gpustack.stock.hnchasing.com/v1"
 )
@@ -113,13 +117,19 @@ async def _get_results(client: httpx.AsyncClient, uuid: str) -> list[dict]:
 
 
 async def _get_result_content(client: httpx.AsyncClient, result: dict) -> dict:
+    """从 CrawlResult 中获取实际内容（处理 MinIO 内部 URL 问题）"""
     url = result.get("result", "")
     if url and isinstance(url, str) and url.startswith("http"):
+        # MinIO 返回的 URL 是 http://localhost/private/...，
+        # 从其他容器访问时需更换为外部可达地址
+        if "localhost" in url:
+            url = url.replace("http://localhost/", WATERCRAWL_HOST + "/")
         try:
             r = await client.get(url)
             r.raise_for_status()
             return r.json()
-        except Exception:
+        except Exception as e:
+            logger.warning("下载结果文件失败: url=%s, error=%s", url[:80], e)
             return {}
     return result if isinstance(result, dict) else {}
 
