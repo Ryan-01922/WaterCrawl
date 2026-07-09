@@ -49,9 +49,9 @@ SECTION_LABELS = {
 
 # 关键词降级备用（AI 失败时使用）
 FALLBACK_KEYWORDS = {
-    "yibao_zhengce": ["政策", "政务信息", "政策文件"],
-    "dongtai": ["医保动态", "新闻动态", "工作动态"],
-    "tongji_shuju": ["统计数据", "统计信息", "数智库"],
+    "yibao_zhengce": ["政策法规", "政策"],
+    "dongtai": ["医保动态", "动态"],
+    "tongji_shuju": ["统计数据", "统计"],
 }
 
 
@@ -200,22 +200,24 @@ async def ai_identify_sections(html: str) -> dict[str, str]:
     # 截取前 200 个链接避免 prompt 过长
     links_text = json.dumps(all_links[:200], ensure_ascii=False, indent=2)
 
-    prompt = f"""你是一个网页分析助手。以下是从国家医保局官网(www.nhsa.gov.cn)首页提取到的导航链接列表。
-请从中找出以下三个栏目的链接：
-1. "医保政策" — 政策文件、政务信息相关的栏目
-2. "动态" — 医保动态、新闻动态、工作动态相关的栏目
-3. "统计数据" — 统计信息、数智库相关的栏目
+    prompt = f"""你是一个网页分析助手。以下是从国家医保局官网首页提取的所有导航栏和内容区链接列表。
+请从中找出以下三个目标栏目的链接：
+
+1. "yibao_zhengce" — 医保政策栏目（在导航栏中通常叫"政策法规"）
+2. "dongtai" — 动态栏目（在导航栏或内容区通常叫"医保动态"）
+3. "tongji_shuju" — 统计数据栏目（在导航栏中通常叫"统计数据"）
 
 要求：
-- 如果找到完全匹配的，直接输出对应链接
-- 如果找不到完全匹配的，根据链接文字和上下文语义选择最接近的一个
-- 如果某个栏目确实找不到，对应值设为空字符串 ""
+- 优先选导航栏中的链接，其次是内容区
+- 链接 URL 通常包含 col/col{{数字}}/ 模式
+- 如果找不到完全匹配，根据语义选择最接近的
+- 如果确实找不到，对应值设为空字符串 ""
 - 只返回 JSON，不要任何其他文字
 
 链接列表：
 {links_text}
 
-请严格按以下 JSON 格式返回（不要 markdown 代码块标记）：
+严格按以下 JSON 格式返回（不要 markdown 代码块标记）：
 {{"yibao_zhengce": "url1", "dongtai": "url2", "tongji_shuju": "url3"}}"""
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -288,43 +290,38 @@ def extract_article_links(html: str, base_url: str) -> list[dict]:
     articles = []
     seen = set()
 
-    # 常见列表选择器
-    selectors = [
-        "ul.news_list li a",
-        "ul.list li a",
-        "div.news_list li a",
-        "div.list li a",
-        "div.content ul li a",
-        "ul li a",
-    ]
-    links = []
-    for sel in selectors:
-        links = soup.select(sel)
-        if links:
-            break
-    if not links:
-        # 宽松匹配：找所有在列表场景下的 a 标签
-        links = soup.select("li a[href]")
-    if not links:
-        links = soup.select("a[href]")
-
-    for a in links:
-        text = a.get_text(strip=True)
+    # 方法1: 通过 URL 模式 /art/ 匹配（最可靠，nhsa 文章链接都含此模式）
+    for a in soup.select("a[href]"):
         href = a.get("href", "").strip()
-        if not text or not href:
-            continue
-        if len(text) < 4:
-            continue
-        if href.startswith("#") or href.startswith("javascript"):
-            continue
-        # 过滤掉"更多>>"这种链接
-        if re.match(r"^更多\s*>*$", text):
-            continue
-        full_url = urljoin(base_url, href)
-        if full_url in seen:
-            continue
-        seen.add(full_url)
-        articles.append({"title": text, "url": full_url})
+        if "/art/" in href:
+            text = a.get_text(strip=True)
+            if not text or len(text) < 4:
+                continue
+            if href.startswith("#") or href.startswith("javascript"):
+                continue
+            full_url = urljoin(base_url, href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            articles.append({"title": text, "url": full_url})
+
+    # 方法2: 回退到 li a 选择器
+    if not articles:
+        for a in soup.select("li a[href]"):
+            text = a.get_text(strip=True)
+            href = a.get("href", "").strip()
+            if not text or not href or len(text) < 4:
+                continue
+            if href.startswith("#") or href.startswith("javascript"):
+                continue
+            if re.match(r"^更多\s*>*$", text):
+                continue
+            full_url = urljoin(base_url, href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            articles.append({"title": text, "url": full_url})
+
     return articles
 
 
