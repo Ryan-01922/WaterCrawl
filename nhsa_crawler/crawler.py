@@ -46,7 +46,8 @@ FALLBACK_KEYWORDS = {
 # ==================== WaterCrawl API 客户端 ====================
 
 def _wc_headers() -> dict:
-    return {"X-API-Key": WATERCRAWL_API_KEY, "Content-Type": "application/json"}
+    """返回 headers，值使用 bytes 避免 httpx 的 ascii 编码问题"""
+    return {"X-API-Key": WATERCRAWL_API_KEY.encode("utf-8"), "Content-Type": b"application/json"}
 
 
 async def _create_crawl(client: httpx.AsyncClient, url: str, page_options: dict = None) -> str:
@@ -188,8 +189,8 @@ async def ai_identify_sections(html: str) -> dict[str, str]:
             resp = await client.post(
                 f"{GPUSTACK_API_BASE}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {GPUSTACK_API_KEY}",
-                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {GPUSTACK_API_KEY}".encode("utf-8"),
+                    "Content-Type": b"application/json",
                 },
                 json={
                     "model": GPUSTACK_MODEL,
