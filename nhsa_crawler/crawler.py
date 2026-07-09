@@ -131,6 +131,10 @@ async def _scrape_page(client: httpx.AsyncClient, url: str, page_options: dict =
     if data.get("status") != "finished":
         return {"status": data.get("status"), "html": "", "results": []}
     results = await _get_results(client, uuid)
+    if results:
+        logger.info("爬取结果原始数据 keys=%s", list(results[0].keys()))
+        result_val = results[0].get("result")
+        logger.info("爬取结果 result 字段类型=%s, 值前200字符=%s", type(result_val).__name__, str(result_val)[:200])
     html = ""
     enriched = []
     for r in results:
