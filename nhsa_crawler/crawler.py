@@ -23,7 +23,7 @@ SECTION_KEYWORDS = {
 
 def _headers():
     return {
-        "Authorization": f"Bearer {WATERCRAWL_API_KEY}",
+        "X-API-Key": WATERCRAWL_API_KEY,
         "Content-Type": "application/json",
     }
 

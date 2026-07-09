@@ -4,6 +4,7 @@ services:
     container_name: nhsa-crawler
     ports:
       - "7108:7108"
+    env_file: .env
     environment:
       - WATERCRAWL_BASE_URL=${WATERCRAWL_BASE_URL:-http://10.60.151.130:7109/api/v1/core}
       - WATERCRAWL_API_KEY=${WATERCRAWL_API_KEY:-}
