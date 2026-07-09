@@ -6,13 +6,21 @@ Layer 3: 文章详情页 → 批量爬取内容，按栏目分类存储
 """
 import asyncio
 import json
+import logging
 import os
 import re
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("nhsa_crawler")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(handler)
 
 # ---- 环境变量 ----
 WATERCRAWL_BASE_URL = os.getenv(
@@ -51,6 +59,7 @@ def _wc_headers() -> dict:
 
 
 async def _create_crawl(client: httpx.AsyncClient, url: str, page_options: dict = None) -> str:
+    logger.info("创建爬取任务: url=%s", url)
     options = {
         "spider_options": {"max_depth": 0, "page_limit": 1},
         "page_options": page_options or {
@@ -60,13 +69,19 @@ async def _create_crawl(client: httpx.AsyncClient, url: str, page_options: dict 
             "timeout": 30000,
         },
     }
-    resp = await client.post(
-        f"{WATERCRAWL_BASE_URL}/crawl-requests/",
-        json={"url": url, "options": options},
-        headers=_wc_headers(),
-    )
-    resp.raise_for_status()
-    return resp.json()["uuid"]
+    try:
+        resp = await client.post(
+            f"{WATERCRAWL_BASE_URL}/crawl-requests/",
+            json={"url": url, "options": options},
+            headers=_wc_headers(),
+        )
+        resp.raise_for_status()
+        uuid = resp.json()["uuid"]
+        logger.info("爬取任务创建成功: uuid=%s, url=%s", uuid, url)
+        return uuid
+    except Exception as e:
+        logger.error("创建爬取任务失败: url=%s, error=%s", url, e)
+        raise
 
 
 async def _wait_crawl(client: httpx.AsyncClient, uuid: str, poll_interval: float = 2.0, max_wait: float = 120) -> dict:
@@ -80,7 +95,10 @@ async def _wait_crawl(client: httpx.AsyncClient, uuid: str, poll_interval: float
         )
         resp.raise_for_status()
         data = resp.json()
+        if data["status"] == "failed":
+            logger.warning("爬取任务失败: uuid=%s, detail=%s", uuid, data.get("error", "无详情"))
         if data["status"] in ("finished", "failed", "canceled"):
+            logger.info("爬取任务结束: uuid=%s, status=%s, 耗时=%.1fs", uuid, data["status"], elapsed)
             return data
     raise TimeoutError(f"爬取超时: {uuid}")
 
@@ -368,11 +386,14 @@ class NhsCrawlerService:
             try:
                 # ---- Layer 1: 爬取首页 + AI 识别栏目 ----
                 self._progress = "Layer 1: 正在爬取首页..."
+                logger.info("=== Layer 1: 爬取首页 ===")
                 page = await _scrape_page(client, NHSA_HOMEPAGE)
                 if page["status"] != "finished" or not page["html"]:
                     self._status = "failed"
-                    self._progress = "首页爬取失败"
+                    self._progress = f"首页爬取失败 (status={page['status']}, html_len={len(page.get('html',''))})"
+                    logger.error("首页爬取失败: status=%s, html_len=%d", page["status"], len(page.get("html", "")))
                     return
+                logger.info("首页爬取成功: html_len=%d", len(page["html"]))
 
                 self._progress = "Layer 1: AI 正在识别栏目链接..."
                 self._section_links = await get_section_links(page["html"])
@@ -435,8 +456,7 @@ class NhsCrawlerService:
             except Exception as e:
                 self._status = "failed"
                 self._progress = f"爬取出错: {e}"
-                import traceback
-                traceback.print_exc()
+                logger.exception("爬取过程发生异常")
 
 
 crawler_service = NhsCrawlerService()
