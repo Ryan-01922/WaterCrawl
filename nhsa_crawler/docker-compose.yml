@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   nhsa-crawler:
-    build: ./nhsa_crawler
+    build: .
     container_name: nhsa-crawler
     ports:
       - "7108:7108"
