@@ -134,33 +134,203 @@ docker logs nhsa-crawler
 
 ## API 接口说明
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/` | GET | 访问测试页面 |
-| `/api/crawl` | POST | 启动爬取任务（爬取全部三个栏目） |
-| `/api/status` | GET | 查询当前任务状态和进度 |
-| `/api/results` | GET | 获取爬取结果（全部栏目） |
-| `/api/results?section=yibao_zhengce` | GET | 获取指定栏目结果 |
+### 基础信息
 
-### 栏目名称对照
+| 项目 | 说明 |
+|------|------|
+| 基础 URL | `http://10.60.151.130:7108` |
+| 数据格式 | 全部请求和响应均为 JSON |
+| 字符编码 | UTF-8 |
 
-| 参数值 | 栏目 |
-|--------|------|
-| `yibao_zhengce` | 医保政策 |
-| `dongtai` | 动态 |
-| `tongji_shuju` | 统计数据 |
+---
+
+### 1. 测试页面
+
+```
+GET /
+```
+
+返回测试页面 HTML，浏览器直接访问即可。
+
+---
+
+### 2. 启动爬取
+
+```
+POST /api/crawl
+```
+
+启动一次完整的爬取流程（三层爬取），异步执行，立即返回。
+
+**响应示例（成功）：**
+```json
+{
+  "status": "started",
+  "message": "爬取任务已启动"
+}
+```
+
+**响应示例（已有任务在执行）：** (HTTP 409)
+```json
+{
+  "status": "busy",
+  "message": "爬取任务正在执行中，请等待完成"
+}
+```
+
+---
+
+### 3. 查询状态
+
+```
+GET /api/status
+```
+
+查询当前爬取任务的运行状态和进度信息。
+
+**响应示例：**
+```json
+{
+  "status": "running",
+  "progress": "Layer 2: 正在爬取【医保政策】列表页..."
+}
+```
+
+**status 枚举：**
+
+| 值 | 说明 |
+|----|------|
+| `idle` | 空闲，无任务执行 |
+| `running` | 爬取任务执行中 |
+| `finished` | 爬取完成 |
+| `failed` | 爬取出错 |
+
+**progress 示例：**
+
+| 阶段 | progress 内容 |
+|------|--------------|
+| Layer 1 | `Layer 1: 正在爬取首页...` |
+| Layer 1 | `Layer 1: AI 正在识别栏目链接...` |
+| Layer 1 | `Layer 1 完成: 识别到 3 个栏目链接` |
+| Layer 2 | `Layer 2: 正在爬取【医保政策】列表页...` |
+| Layer 2 | `【医保动态】列表页找到 15 篇文章` |
+| Layer 3 | `Layer 3: 正在批量爬取【医保政策】15 篇文章...` |
+| 完成 | `爬取全部完成！` |
+| 失败 | `爬取出错: {错误详情}` |
+
+---
+
+### 4. 获取结果
+
+```
+GET /api/results
+GET /api/results?section={栏目名称}
+```
+
+获取爬取结果数据。
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `section` | string | 否 | 栏目名称，不传则返回全部栏目 |
+
+**section 可选值：**
+
+| 值 | 栏目 | 对应网站栏目 |
+|----|------|-------------|
+| `yibao_zhengce` | 医保政策 | 政策法规 (col104) |
+| `dongtai` | 动态 | 医保动态 (col14) |
+| `tongji_shuju` | 统计数据 | 统计数据 (col7) |
+
+**响应示例（全部结果）：**
+```json
+{
+  "status": "finished",
+  "progress": "爬取全部完成！",
+  "results": {
+    "yibao_zhengce": [
+      {
+        "title": "关于印发2026年纠正医药购销领域和医疗服务中不正之风工作要点的通知",
+        "url": "https://www.nhsa.gov.cn/art/2026/6/9/art_104_20892.html",
+        "content": {
+          "uuid": "...",
+          "url": "https://www.nhsa.gov.cn/...",
+          "result": {
+            "markdown": "## 文章内容...",
+            "html": "<h2>文章内容...</h2>",
+            "metadata": {...}
+          }
+        }
+      }
+    ],
+    "dongtai": [...],
+    "tongji_shuju": [...]
+  }
+}
+```
+
+**响应示例（指定栏目）：**
+```json
+{
+  "status": "finished",
+  "progress": "爬取全部完成！",
+  "results": [
+    {
+      "title": "2026年1-5月基本医疗保险统筹基金和生育保险主要指标",
+      "url": "https://www.nhsa.gov.cn/art/2026/6/12/art_7_20975.html",
+      "content": {
+        "uuid": "...",
+        "url": "https://www.nhsa.gov.cn/...",
+        "result": {
+          "markdown": "## 2026年1-5月...",
+          "html": "...",
+          "metadata": {...}
+        }
+      }
+    }
+  ]
+}
+```
+
+**响应示例（任务未完成）：**
+```json
+{
+  "status": "running",
+  "progress": "Layer 2: 正在爬取【医保动态】列表页...",
+  "results": null
+}
+```
+
+---
+
+### 5. 错误码说明
+
+| HTTP 状态码 | 说明 |
+|-------------|------|
+| 200 | 请求成功 |
+| 400 | 参数错误（如无效的 section 名称） |
+| 409 | 资源冲突（爬取任务已在执行中） |
+| 500 | 服务器内部错误 |
+
+---
 
 ### 调用示例
 
 ```bash
-# 启动爬取
+# 1. 启动爬取任务
 curl -X POST http://10.60.151.130:7108/api/crawl
+# 响应: {"status":"started","message":"爬取任务已启动"}
 
-# 查询状态
+# 2. 轮询查询状态（建议间隔 2-3 秒）
 curl http://10.60.151.130:7108/api/status
+# 响应: {"status":"running","progress":"Layer 2: 正在爬取【医保动态】列表页..."}
 
-# 获取结果
-curl http://10.60.151.130:7108/api/results
+# 3. 爬取完成后获取全部结果
+curl http://10.60.151.130:7108/api/results | jq .
+
+# 4. 获取指定栏目结果
+curl "http://10.60.151.130:7108/api/results?section=dongtai" | jq .
 ```
 
 ---
@@ -189,17 +359,49 @@ curl http://10.60.151.130:7108/api/results
 
 ## 爬取流程
 
+采用三层架构，逐层深入：
+
 ```
-首页 https://www.nhsa.gov.cn/
+Layer 1: 爬取首页
     │
-    ├── 解析出三个栏目的链接（基于关键词匹配）
+    ├── WaterCrawl 爬取首页 HTML
+    ├── Qwen3-32B (GPUStack) AI 识别三个栏目的链接
+    │   └── 失败时降级到关键词匹配
     │
-    ├── 医保政策列表页 ── 提取文章链接 ── 批量爬取文章内容
-    ├── 动态列表页    ── 提取文章链接 ── 批量爬取文章内容
-    └── 统计数据列表页 ── 提取文章链接 ── 批量爬取文章内容
+    ▼
+Layer 2: 爬取栏目列表页（第 1 页）
+    │
+    ├── 医保政策 (col104) ── 通过 /art/ URL 模式提取文章链接
+    ├── 医保动态 (col14)  ── 通过 /art/ URL 模式提取文章链接
+    └── 统计数据 (col7)   ── 通过 /art/ URL 模式提取文章链接
+    │
+    ▼
+Layer 3: 批量爬取文章详情
+    │
+    ├── WaterCrawl batch API 并发爬取所有文章
+    ├── 获取文章 markdown/html 内容
+    └── 按栏目归类存储
 ```
 
-每个列表页只爬取 **第 1 页**。
+### 栏目与网站真实映射
+
+| 爬取栏目 | 网站原始栏目 | 栏目 ID |
+|---------|-------------|---------|
+| 医保政策 | 政策法规 | col104 |
+| 动态 | 医保动态 | col14 |
+| 统计数据 | 统计数据 | col7 |
+
+### 文章 URL 模式
+
+所有文章链接均符合以下模式：
+```
+https://www.nhsa.gov.cn/art/{年份}/{月}/art_{栏目ID}_{文章ID}.html
+```
+
+示例：
+- `https://www.nhsa.gov.cn/art/2026/7/9/art_14_21343.html` — 医保动态文章
+- `https://www.nhsa.gov.cn/art/2026/6/9/art_104_20892.html` — 政策法规文章
+- `https://www.nhsa.gov.cn/art/2026/6/12/art_7_20975.html` — 统计数据文章
 
 ---
 
