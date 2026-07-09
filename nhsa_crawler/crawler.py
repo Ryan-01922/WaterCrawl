@@ -120,12 +120,14 @@ async def _get_result_content(client: httpx.AsyncClient, result: dict) -> dict:
     """从 CrawlResult 中获取实际内容（处理 MinIO 内部 URL 问题）"""
     url = result.get("result", "")
     if url and isinstance(url, str) and url.startswith("http"):
-        # MinIO 返回的 URL 是 http://localhost/private/...，
-        # 从其他容器访问时需更换为外部可达地址
+        # MinIO 返回的 presigned URL 含 localhost，签名也是针对 localhost 生成的。
+        # 从外部访问时需：1) 替换 URL 中的 host；2) 保留 Host: localhost 请求头
+        req_headers = {}
         if "localhost" in url:
             url = url.replace("http://localhost/", WATERCRAWL_HOST + "/")
+            req_headers["Host"] = "localhost"
         try:
-            r = await client.get(url)
+            r = await client.get(url, headers=req_headers)
             r.raise_for_status()
             return r.json()
         except Exception as e:
