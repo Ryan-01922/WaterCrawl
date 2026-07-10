@@ -475,7 +475,7 @@ async def ai_generate_summary(titles: list[str]) -> str:
             return summary
         except Exception as e:
             logger.warning("[摘要] 生成失败: %s", e)
-            return """
+            return ""
 
 
 # ==================== 主服务 ====================
