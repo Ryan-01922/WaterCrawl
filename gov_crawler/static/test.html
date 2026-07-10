@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gov Crawler - 测试页面</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #333; padding: 20px; }
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
+.card { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.card h2 { font-size: 18px; margin-bottom: 12px; color: #1a1a2e; }
+.config-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+.config-row label { font-weight: 600; min-width: 80px; line-height: 36px; }
+.config-row select, .config-row input { flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+.btn { padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600; transition: opacity 0.2s; }
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: #4361ee; color: #fff; }
+.btn-success { background: #2ecc71; color: #fff; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 12px; border-radius: 8px; }
+.status-idle { background: #e8f4fd; color: #2196F3; }
+.status-running { background: #fff3e0; color: #ff9800; }
+.status-finished { background: #e8f5e9; color: #4caf50; }
+.status-failed { background: #fbe9e7; color: #f44336; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot-idle { background: #2196F3; }
+.dot-running { background: #ff9800; animation: pulse 1s infinite; }
+.dot-finished { background: #4caf50; }
+.dot-failed { background: #f44336; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.article-list { list-style: none; }
+.article-item { border-bottom: 1px solid #eee; padding: 12px 0; }
+.article-item:last-child { border-bottom: none; }
+.article-title { font-weight: 600; margin-bottom: 4px; }
+.article-url { font-size: 12px; color: #888; word-break: break-all; }
+.article-content { margin-top: 8px; padding: 12px; background: #f9f9f9; border-radius: 6px; font-size: 13px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
+.hint { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Gov Crawler - 测试页面</h1>
+
+  <div class="card">
+    <h2>选择目标站点</h2>
+    <div class="config-row">
+      <label>预设站点:</label>
+      <select id="presetSelect" onchange="onPresetChange()">
+        <option value="">-- 请选择 --</option>
+      </select>
+    </div>
+    <div class="config-row">
+      <label>自定义 URL:</label>
+      <input id="customUrl" placeholder="或手动输入任意政府网站列表页 URL">
+    </div>
+    <p class="hint">选择一个预设站点，或输入自定义 URL。自定义 URL 优先级更高。</p>
+  </div>
+
+  <div class="card">
+    <h2>操作</h2>
+    <div id="statusBar" class="status-bar status-idle">
+      <span id="statusDot" class="status-dot dot-idle"></span>
+      <span id="statusText">就绪</span>
+      <span id="progressText" style="margin-left:12px;font-size:13px;"></span>
+    </div>
+    <div style="display:flex;gap:12px;">
+      <button class="btn btn-primary" id="btnCrawl" onclick="startCrawl()">开始爬取</button>
+      <button class="btn btn-danger" id="btnRefresh" onclick="refreshStatus()">刷新状态</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>结果 (<span id="resultCount">0</span> 篇)</h2>
+    <div id="resultsArea">
+      <p style="color:#888;">选择一个站点或输入 URL，点击"开始爬取"</p>
+    </div>
+  </div>
+</div>
+
+<script>
+let pollTimer = null;
+
+const STATUS_LABELS = { idle: '就绪', running: '运行中', finished: '已完成', failed: '失败' };
+
+async function loadSources() {
+  try {
+    const resp = await fetch('/api/sources');
+    const data = await resp.json();
+    const select = document.getElementById('presetSelect');
+    for (const src of data.sources) {
+      const opt = document.createElement('option');
+      opt.value = src.url;
+      opt.textContent = src.label;
+      opt.title = src.desc;
+      select.appendChild(opt);
+    }
+  } catch(e) {
+    console.error('加载站点列表失败:', e);
+    // 预设站点列表（接口不可用时的备用）
+    const sources = [
+      { label: '财政部税政司 - 政策发布', url: 'https://szs.mof.gov.cn/zhengcefabu/' },
+      { label: '中央网信办 - 网信发布', url: 'https://www.cac.gov.cn/wxzw/wxfb/A093702index_1.htm' },
+    ];
+    const select = document.getElementById('presetSelect');
+    for (const src of sources) {
+      const opt = document.createElement('option');
+      opt.value = src.url;
+      opt.textContent = src.label;
+      select.appendChild(opt);
+    }
+  }
+}
+
+function onPresetChange() {
+  const val = document.getElementById('presetSelect').value;
+  if (val) {
+    document.getElementById('customUrl').value = val;
+  }
+}
+
+function getTargetUrl() {
+  const custom = document.getElementById('customUrl').value.trim();
+  return custom || '';
+}
+
+async function startCrawl() {
+  const url = getTargetUrl();
+  if (!url) {
+    alert('请选择预设站点或输入自定义 URL');
+    return;
+  }
+  if (!url.startsWith('http')) {
+    alert('URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+
+  const btn = document.getElementById('btnCrawl');
+  btn.disabled = true;
+  btn.textContent = '启动中...';
+
+  try {
+    const resp = await fetch('/api/crawl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+    });
+    const data = await resp.json();
+    if (resp.status === 409) {
+      alert('爬取任务已在运行中，请等待完成');
+      btn.disabled = false;
+      btn.textContent = '开始爬取';
+      return;
+    }
+    startPolling();
+  } catch(e) {
+    alert('启动失败: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '开始爬取';
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refreshStatus, 3000);
+  refreshStatus();
+}
+
+async function refreshStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    updateStatusBar(data.status, data.progress);
+
+    const btn = document.getElementById('btnCrawl');
+    if (data.status === 'running') {
+      btn.disabled = true;
+      btn.textContent = '爬取中...';
+      if (!pollTimer) startPolling();
+    } else {
+      btn.disabled = false;
+      btn.textContent = '开始爬取';
+      if (pollTimer && data.status !== 'running') {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    if (data.status === 'finished' || data.status === 'failed') {
+      await loadResults();
+    }
+  } catch(e) {
+    console.error('刷新状态失败:', e);
+  }
+}
+
+function updateStatusBar(status, progress) {
+  const bar = document.getElementById('statusBar');
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const prog = document.getElementById('progressText');
+
+  bar.className = 'status-bar status-' + status;
+  dot.className = 'status-dot dot-' + status;
+  text.textContent = STATUS_LABELS[status] || status;
+  prog.textContent = progress || '';
+}
+
+async function loadResults() {
+  try {
+    const resp = await fetch('/api/results');
+    const data = await resp.json();
+    renderResults(data.results);
+  } catch(e) {
+    document.getElementById('resultsArea').innerHTML = '<p style="color:red;">加载结果失败: ' + e.message + '</p>';
+  }
+}
+
+function renderResults(results) {
+  const area = document.getElementById('resultsArea');
+  const countEl = document.getElementById('resultCount');
+
+  if (!results || results.length === 0) {
+    area.innerHTML = '<p style="color:#888;">暂无结果</p>';
+    countEl.textContent = '0';
+    return;
+  }
+
+  countEl.textContent = results.length;
+
+  let html = '<ul class="article-list">';
+  for (const a of results) {
+    html += '<li class="article-item">';
+    html += '<div class="article-title">' + escapeHtml(a.title || '无标题') + '</div>';
+    html += '<div class="article-url">' + escapeHtml(a.url || '') + '</div>';
+    if (a.content && a.content.result) {
+      const inner = a.content.result;
+      let text = '';
+      if (typeof inner === 'string') {
+        text = inner;
+      } else if (inner.markdown) {
+        text = inner.markdown;
+      } else if (inner.html) {
+        text = inner.html.replace(/<[^>]*>/g, '').trim();
+      } else {
+        text = JSON.stringify(inner);
+      }
+      html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看内容</summary>';
+      html += '<div class="article-content">' + escapeHtml(text).substring(0, 3000) + '</div></details>';
+    }
+    html += '</li>';
+  }
+  html += '</ul>';
+  area.innerHTML = html;
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+loadSources();
+refreshStatus();
+</script>
+</body>
+</html>

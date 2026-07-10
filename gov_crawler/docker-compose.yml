@@ -1,0 +1,8 @@
+services:
+  gov-crawler:
+    build: .
+    container_name: gov-crawler
+    ports:
+      - "7107:7107"
+    env_file: .env
+    restart: unless-stopped
