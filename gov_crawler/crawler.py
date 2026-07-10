@@ -53,35 +53,37 @@ PRESET_SOURCES = [
     },
 ]
 
-# 文章链接筛选黑名单（这些 URL 模式通常不是文章）
-EXCLUDE_URL_PATTERNS = [
-    re.compile(r"javascript", re.I),
-    re.compile(r"^#$"),
-    re.compile(r"/index\.htm"),
-    re.compile(r"/index_\d+\.htm"),
+# 附件/下载类链接过滤（只过滤这些，其余全量给 AI）
+ATTACHMENT_PATTERNS = [
     re.compile(r"\.docx?$", re.I),
     re.compile(r"\.xlsx?$", re.I),
     re.compile(r"\.pdf$", re.I),
     re.compile(r"\.zip$", re.I),
+    re.compile(r"\.rar$", re.I),
+    re.compile(r"\.pptx?$", re.I),
 ]
 
-# 文章链接筛选白名单（优先用这些模式匹配）
+# 降级阶段的文章 URL 白名单（AI 失败时使用，只做正则匹配不做前置过滤）
 ARTICLE_URL_PATTERNS = [
-    re.compile(r"/art/", re.I),                    # nhsa 模式
-    re.compile(r"/\d{6}/t\d{8}_\d+\.htm"),         # mof 模式: /202607/t20260708_3993182.htm
-    re.compile(r"/\d{4}-\d{2}/\d{2}/c_\d+\.htm"),  # cac 模式: /2026-07/06/c_1785086223921593.htm
-    re.compile(r"/content/\d+"),                    # 通用 content 模式
-    re.compile(r"/\d{4}-\d{2}/\d{2}/content_\d+"),  # 通用 content 模式
-    re.compile(r"/info/\d+"),                       # 通用 info 模式
+    re.compile(r"/art/", re.I),                         # nhsa 模式
+    re.compile(r"/\d{6}/t\d{8}_\d+\.htm"),              # mof: /202607/t20260708_3993182.htm
+    re.compile(r"/\d{4}-\d{2}/\d{2}/c_\d+\.htm"),       # cac: /2026-07/06/c_1785086223921593.htm
+    re.compile(r"/content/\d+"),                         # 通用 content
+    re.compile(r"/\d{4}-\d{2}/\d{2}/content_\d+"),       # 通用 content（日期格式）
+    re.compile(r"/info/\d+"),                            # 通用 info
+    re.compile(r"/xxgk/.*/\d+\.htm"),                   # 政务公开
+    re.compile(r"/\d+/t\d+_\d+\.htm"),                  # 缩略日期: /2025/t12345_67890.htm
+    re.compile(r"\.gov\.cn/.*/\d{4}.*\.html?"),         # 政府域名 + 年份标记
+    re.compile(r"/\d{4}-\d{2}/\d{2}/.*\.htm"),          # 日期路径: /2025-06/18/xxx.htm
 ]
 
 
-def _is_article_url(url: str) -> bool:
-    """判断一个 URL 是否可能是文章链接"""
-    for pat in EXCLUDE_URL_PATTERNS:
+def _is_attachment_url(url: str) -> bool:
+    """判断 URL 是否是附件/下载链接（这些不放行给 AI）"""
+    for pat in ATTACHMENT_PATTERNS:
         if pat.search(url):
-            return False
-    return True
+            return True
+    return False
 
 
 # ==================== WaterCrawl API 客户端 ====================
@@ -192,7 +194,7 @@ async def _scrape_page(client: httpx.AsyncClient, url: str, page_options: dict =
 # ==================== AI 文章链接提取 ====================
 
 def _extract_links_from_html(html: str, base_url: str) -> list[dict]:
-    """从 HTML 中提取所有有意义的链接，供 AI 分析"""
+    """[阶段1] 从 HTML 中全量提取候选链接，只过滤 JS/锚点/附件，其余全部交给 AI"""
     soup = BeautifulSoup(html, "lxml")
     links = []
     seen = set()
@@ -200,52 +202,56 @@ def _extract_links_from_html(html: str, base_url: str) -> list[dict]:
     for tag in soup.select("a[href]"):
         text = tag.get_text(strip=True)
         href = tag.get("href", "").strip()
-        if not text or not href or len(text) < 3:
+        # 基础过滤：空文本、JS、锚点、附件
+        if not text or not href:
             continue
-        if href.startswith("#") or href.startswith("javascript"):
+        if href.startswith("#") or href.startswith("javascript:") or href.startswith("mailto:"):
             continue
         full_url = urljoin(base_url, href)
         if full_url in seen:
             continue
-        if not _is_article_url(full_url):
+        if _is_attachment_url(full_url):
             continue
         seen.add(full_url)
+        # 提取父节点上下文
         parent_text = ""
         parent = tag.parent
         if parent:
             parent_text = parent.get_text(" ", strip=True)[:100]
         links.append({"text": text, "url": full_url, "context": parent_text})
+
+    logger.info("[阶段1] 提取到 %d 个候选链接", len(links))
     return links
 
 
 async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
-    """使用 Qwen3-32B 从列表页 HTML 中智能提取文章链接"""
+    """[阶段2] 使用 Qwen3-32B 从全量候选链接中智能筛选文章链接"""
     all_links = _extract_links_from_html(html, base_url)
     if not all_links:
-        logger.warning("HTML 中未提取到任何链接")
+        logger.warning("[阶段2] HTML 中未提取到任何链接")
         return []
 
-    # 截取前 300 个链接
-    links_text = json.dumps(all_links[:300], ensure_ascii=False, indent=2)
+    # 截取前 400 个链接避免 prompt 过长
+    ai_input = all_links[:400]
+    links_text = json.dumps(ai_input, ensure_ascii=False, indent=2)
 
     prompt = f"""你是一个网页分析助手。以下是从一个政府网站的列表页提取到的所有链接。
-
-请从中筛选出真正的「文章」链接（即每一条法规、政策、通知、公告等正文页面的链接），排除以下类型：
-- 导航栏链接（如"首页""上一页""下一页""尾页"等）
-- 分页链接（如页码 1/2/3）
-- 非文章页（如栏目首页、PDF附件、附件下载链接等）
-- 面包屑链接
+请从中筛选出真正的「文章/正文」链接，排除以下：
+- 导航栏（首页、上一页、下一页、尾页）
+- 分页链接（页码数字）
+- 面包屑路径
+- 栏目首页、频道页
+- 非正文页
 
 要求：
-- 每条文章返回 title（标题文字）和 url（完整链接）
-- title 为空或明显不是文章标题的不要
+- 每条返回 title 和 url
 - 只返回 JSON 数组，不要任何其他文字
 
 链接列表：
 {links_text}
 
-严格按以下 JSON 格式返回（不要 markdown 代码块标记）：
-[{{"title": "文章标题", "url": "https://..."}}, ...]"""
+严格返回格式：
+[{{"title": "标题", "url": "完整URL"}}, ...]"""
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
@@ -259,7 +265,7 @@ async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
                     "model": GPUSTACK_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 4000,
+                    "max_tokens": 4096,
                 },
             )
             resp.raise_for_status()
@@ -268,70 +274,123 @@ async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
             articles = json.loads(content)
             if isinstance(articles, list) and all(isinstance(a, dict) for a in articles):
-                logger.info("AI 识别到 %d 篇文章", len(articles))
+                logger.info("[阶段2] AI 识别到 %d 篇文章", len(articles))
+                if articles:
+                    logger.info("[阶段2] 第一篇: 《%s》 %s", articles[0].get("title", "?"), articles[0].get("url", "")[:80])
                 return articles
+            logger.warning("[阶段2] AI 返回格式异常: %s", type(articles))
             return []
         except Exception as e:
-            logger.warning("AI 识别文章链接失败: %s", e)
+            logger.warning("[阶段2] AI 识别失败: %s", e)
             return []
 
 
 def fallback_extract_article_links(html: str, base_url: str) -> list[dict]:
-    """AI 失败时的降级方案：规则提取文章链接"""
+    """[阶段3] AI 失败时的降级方案：三阶梯规则提取"""
     soup = BeautifulSoup(html, "lxml")
     articles = []
     seen = set()
 
-    # 方法1: 用 URL 白名单模式匹配
+    # 3a: URL 白名单正则匹配
     for a in soup.select("a[href]"):
-        href = a.get("href", "").strip()
         text = a.get_text(strip=True)
-        if not text or not href or len(text) < 4:
+        href = a.get("href", "").strip()
+        if not text or not href or len(text) < 3:
             continue
-        if href.startswith("#") or href.startswith("javascript"):
+        if href.startswith("#") or href.startswith("javascript:") or href.startswith("mailto:"):
             continue
         full_url = urljoin(base_url, href)
         if full_url in seen:
             continue
-        if not _is_article_url(full_url):
+        if _is_attachment_url(full_url):
             continue
-        # 检查是否匹配已知文章 URL 模式
-        matched = any(pat.search(full_url) for pat in ARTICLE_URL_PATTERNS)
-        if matched:
+        if any(pat.search(full_url) for pat in ARTICLE_URL_PATTERNS):
             seen.add(full_url)
             articles.append({"title": text, "url": full_url})
 
-    # 方法2: 回退到 li a 选择器
-    if not articles:
-        for a in soup.select("li a[href]"):
-            text = a.get_text(strip=True)
-            href = a.get("href", "").strip()
-            if not text or not href or len(text) < 4:
-                continue
-            if href.startswith("#") or href.startswith("javascript"):
-                continue
-            if re.match(r"^更多\s*>*$", text):
-                continue
-            if text in ("首页", "上一页", "下一页", "尾页", ">", ">>", "<", "<<"):
-                continue
-            full_url = urljoin(base_url, href)
-            if full_url in seen:
-                continue
-            if not _is_article_url(full_url):
-                continue
-            seen.add(full_url)
-            articles.append({"title": text, "url": full_url})
+    if articles:
+        logger.info("[阶段3a] URL 白名单匹配到 %d 篇文章", len(articles))
+        return articles
 
+    # 3b: <li> a 选择器
+    for a in soup.select("li a[href]"):
+        text = a.get_text(strip=True)
+        href = a.get("href", "").strip()
+        if not text or not href or len(text) < 3:
+            continue
+        if href.startswith("#") or href.startswith("javascript:"):
+            continue
+        if re.match(r"^更多\s*>*$", text):
+            continue
+        if text in ("首页", "上一页", "下一页", "尾页", ">", ">>", "<", "<<"):
+            continue
+        if re.match(r"^\d+$", text):
+            continue
+        full_url = urljoin(base_url, href)
+        if full_url in seen:
+            continue
+        if _is_attachment_url(full_url):
+            continue
+        seen.add(full_url)
+        articles.append({"title": text, "url": full_url})
+
+    if articles:
+        logger.info("[阶段3b] li a 选择器匹配到 %d 篇文章", len(articles))
+        return articles
+
+    # 3c: 全页面 a 标签 + 启发式过滤
+    for a in soup.select("a[href]"):
+        text = a.get_text(strip=True)
+        href = a.get("href", "").strip()
+        if not text or not href or len(text) < 4:
+            continue
+        if href.startswith("#") or href.startswith("javascript:"):
+            continue
+        if text in ("首页", "上一页", "下一页", "尾页", ">", ">>", "<", "<<", "更多", "更多>>"):
+            continue
+        if re.match(r"^\d+$", text):
+            continue
+        full_url = urljoin(base_url, href)
+        if full_url in seen:
+            continue
+        if _is_attachment_url(full_url):
+            continue
+        # 启发式：文章 URL 通常比栏目首页更深、更长
+        if full_url == base_url or full_url.rstrip("/") == base_url.rstrip("/"):
+            continue
+        seen.add(full_url)
+        articles.append({"title": text, "url": full_url})
+
+    logger.info("[阶段3c] 全页面启发式匹配到 %d 篇文章", len(articles))
     return articles
 
 
 async def extract_article_links(html: str, base_url: str) -> list[dict]:
-    """获取文章链接：先用 AI，失败则降级"""
-    result = await ai_extract_article_links(html, base_url)
-    if result:
-        return result
-    logger.info("AI 未识别到文章，使用降级方案")
-    return fallback_extract_article_links(html, base_url)
+    """获取文章链接：AI 优先 + 降级 + 智能合并"""
+    ai_result = await ai_extract_article_links(html, base_url)
+
+    if not ai_result or len(ai_result) < 3:
+        # AI 失败或返回太少 → 启用降级
+        fallback_result = fallback_extract_article_links(html, base_url)
+
+        if not ai_result:
+            logger.info("AI 未识别到文章，全部使用降级方案")
+            return fallback_result
+
+        # AI 返回 < 3 篇 → 合并两者（取并集，互补）
+        fallback_urls = {a["url"] for a in fallback_result}
+        merged = list(ai_result)
+        for fb in fallback_result:
+            if fb["url"] not in {m["url"] for m in merged}:
+                merged.append(fb)
+
+        logger.info(
+            "AI(%d篇) + 降级(%d篇) 合并 = %d 篇",
+            len(ai_result), len(fallback_result), len(merged),
+        )
+        return merged
+
+    return ai_result
 
 
 # ==================== 批量爬取 ====================
