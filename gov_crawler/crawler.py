@@ -433,6 +433,51 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
     return enriched
 
 
+# ==================== AI 摘要生成 ====================
+
+async def ai_generate_summary(titles: list[str]) -> str:
+    """使用 Qwen3-32B 根据文章标题列表生成摘要"""
+    if not titles:
+        return ""
+
+    titles_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+
+    prompt = f"""以下是某政府网站一个列表页的所有文章标题。请根据这些标题生成一段约200字的摘要，概括这些文章的主题和关注重点。
+
+文章标题列表（共{len(titles)}篇）：
+{titles_text}
+
+要求：
+- 用一段连贯的中文文字概括
+- 突出主题分布和核心关注点
+- 约200字即可
+- 只返回摘要文字，不要任何额外说明"""
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.post(
+                f"{GPUSTACK_API_BASE}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GPUSTACK_API_KEY}".encode("utf-8"),
+                    "Content-Type": b"application/json",
+                },
+                json={
+                    "model": GPUSTACK_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 500,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            summary = data["choices"][0]["message"]["content"].strip()
+            logger.info("[摘要] 生成完成: %s...", summary[:80])
+            return summary
+        except Exception as e:
+            logger.warning("[摘要] 生成失败: %s", e)
+            return """
+
+
 # ==================== 主服务 ====================
 
 class GovCrawlerService:
@@ -443,6 +488,7 @@ class GovCrawlerService:
         self._progress = ""
         self._target_url: str = ""
         self._results: list = []
+        self._summary: str = ""
 
     @property
     def status(self) -> str:
@@ -454,6 +500,9 @@ class GovCrawlerService:
 
     def get_results(self) -> list:
         return self._results
+
+    def get_summary(self) -> str:
+        return self._summary
 
     async def crawl_url(self, url: str):
         """对指定 URL 执行完整两层爬取"""
@@ -498,6 +547,13 @@ class GovCrawlerService:
                 self._results = merged
                 self._status = "finished"
                 self._progress = f"爬取完成: 共 {len(merged)} 篇文章"
+
+                # ---- AI 摘要 ----
+                if merged:
+                    self._progress = "正在生成 AI 摘要..."
+                    titles = [m["title"] for m in merged if m.get("title")]
+                    self._summary = await ai_generate_summary(titles)
+                    self._progress = f"全部完成: {len(merged)} 篇文章 + AI 摘要"
 
             except Exception as e:
                 self._status = "failed"

@@ -64,11 +64,13 @@ async def get_results():
             "status": crawler_service.status,
             "progress": crawler_service.progress,
             "results": None,
+            "summary": None,
         }
     return {
         "status": crawler_service.status,
         "progress": crawler_service.progress,
         "results": crawler_service.get_results(),
+        "summary": crawler_service.get_summary(),
     }
 
 

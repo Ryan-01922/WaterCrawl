@@ -38,6 +38,8 @@ h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
 .article-url { font-size: 12px; color: #888; word-break: break-all; }
 .article-content { margin-top: 8px; padding: 12px; background: #f9f9f9; border-radius: 6px; font-size: 13px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
 .hint { font-size: 12px; color: #888; margin-top: 4px; }
+.summary-box { padding: 16px; background: linear-gradient(135deg, #667eea15, #764ba215); border-radius: 8px; border-left: 4px solid #4361ee; margin-bottom: 16px; font-size: 14px; line-height: 1.8; }
+.summary-box .summary-label { font-weight: 700; color: #4361ee; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -212,10 +214,17 @@ async function loadResults() {
   try {
     const resp = await fetch('/api/results');
     const data = await resp.json();
+    renderSummary(data.summary);
     renderResults(data.results);
   } catch(e) {
     document.getElementById('resultsArea').innerHTML = '<p style="color:red;">加载结果失败: ' + e.message + '</p>';
   }
+}
+
+function renderSummary(summary) {
+  const area = document.getElementById('resultsArea');
+  if (!summary) return;
+  area.innerHTML = '<div class="summary-box"><div class="summary-label">AI 摘要</div><div>' + escapeHtml(summary) + '</div></div>';
 }
 
 function renderResults(results) {
