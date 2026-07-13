@@ -10,10 +10,13 @@ import json
 import logging
 import os
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin
 
 import httpx
+import redis.asyncio as aioredis
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("gov_crawler")
@@ -36,6 +39,12 @@ GPUSTACK_API_BASE = os.getenv(
 )
 GPUSTACK_API_KEY = os.getenv("GPUSTACK_API_KEY", "")
 GPUSTACK_MODEL = os.getenv("GPUSTACK_MODEL", "qwen3-32b")
+
+# ---- Redis / Task Queue ----
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+WORKER_COUNT = int(os.getenv("WORKER_COUNT", "3"))
+QUEUE_KEY = "gov_crawler:queue"
+TASK_PREFIX = "gov_crawler:task:"
 
 # 预设站点
 PRESET_SOURCES = [
@@ -503,8 +512,24 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
+            # 健壮 JSON 提取：先找 [ ... ] 包围的数组部分
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
-            cleaned_list = json.loads(content)
+            array_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if array_match:
+                content = array_match.group()
+            try:
+                cleaned_list = json.loads(content)
+            except json.JSONDecodeError:
+                # 如果整体解析失败，逐个提取 {…} 对象
+                logger.warning("[清洗] 整体 JSON 解析失败，尝试逐条提取")
+                obj_pattern = re.compile(r'\{"title":\s*"[^"]*",\s*"publish_date":\s*"[^"]*",\s*"source":\s*"[^"]*",\s*"body":\s*"[^"]*"\}', re.DOTALL)
+                cleaned_list = []
+                for match in obj_pattern.finditer(content):
+                    try:
+                        cleaned_list.append(json.loads(match.group()))
+                    except json.JSONDecodeError:
+                        continue
+                logger.info("[清洗] 逐条提取到 %d 篇", len(cleaned_list))
             if isinstance(cleaned_list, list):
                 logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
                 return cleaned_list
@@ -559,111 +584,194 @@ async def ai_generate_summary(titles: list[str]) -> str:
             return ""
 
 
-# ==================== 主服务 ====================
+# ==================== Redis 任务队列 ====================
 
-class GovCrawlerService:
-    """政府网站列表页文章爬取服务"""
+def _task_key(task_id: str, field: str = "") -> str:
+    if field:
+        return f"{TASK_PREFIX}{task_id}:{field}"
+    return f"{TASK_PREFIX}{task_id}"
+
+
+class TaskManager:
+    """基于 Redis 的任务队列管理器"""
 
     def __init__(self):
-        self._status = "idle"
-        self._progress = ""
-        self._target_url: str = ""
-        self._results: list = []
-        self._summary: str = ""
+        self.redis: Optional[aioredis.Redis] = None
 
-    @property
-    def status(self) -> str:
-        return self._status
+    async def init(self):
+        self.redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+        await self.redis.ping()
+        logger.info("Redis 连接成功: %s", REDIS_URL)
 
-    @property
-    def progress(self) -> str:
-        return self._progress
+    async def close(self):
+        if self.redis:
+            await self.redis.close()
 
-    def get_results(self) -> list:
-        return self._results
+    async def create_task(self, url: str) -> str:
+        """创建爬取任务，入队，返回 task_id"""
+        task_id = str(uuid.uuid4())[:8]
+        now = datetime.now(timezone.utc).isoformat()
+        await self.redis.hset(
+            _task_key(task_id),
+            mapping={
+                "url": url,
+                "status": "pending",
+                "progress": "任务已加入队列",
+                "created_at": now,
+                "links": "[]",
+                "results": "[]",
+                "summary": "",
+            },
+        )
+        await self.redis.rpush(QUEUE_KEY, task_id)
+        logger.info("任务已入队: task_id=%s, url=%s", task_id, url)
+        return task_id
 
-    def get_summary(self) -> str:
-        return self._summary
+    async def update_task(self, task_id: str, **kwargs):
+        """更新任务字段"""
+        await self.redis.hset(_task_key(task_id), mapping=kwargs)
 
-    async def crawl_url(self, url: str):
-        """对指定 URL 执行完整两层爬取"""
-        self._status = "running"
-        self._progress = ""
-        self._results = []
-        self._target_url = url
+    async def get_task(self, task_id: str) -> Optional[dict]:
+        """获取任务完整信息"""
+        data = await self.redis.hgetall(_task_key(task_id))
+        if not data:
+            return None
+        return data
 
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            try:
-                # ---- Layer 1: 爬取列表页 + AI 识别文章链接 ----
-                self._progress = "Layer 1: 正在爬取列表页..."
-                logger.info("=== Layer 1: 爬取列表页 ===")
-                page = await _scrape_page(client, url)
-                if page["status"] != "finished" or not page["html"]:
-                    self._status = "failed"
-                    self._progress = f"列表页爬取失败 (status={page['status']}, html_len={len(page.get('html',''))})"
-                    logger.error("列表页爬取失败: status=%s, html_len=%d", page["status"], len(page.get("html", "")))
-                    return
-                logger.info("列表页爬取成功: html_len=%d", len(page["html"]))
-                logger.info("列表页 HTML 前500字符: %s", page["html"][:500].replace("\n", " "))
+    async def get_links(self, task_id: str) -> list:
+        raw = await self.redis.hget(_task_key(task_id), "links")
+        return json.loads(raw) if raw else []
 
-                # ---- iframe 检测与追加爬取 ----
-                iframe_soup = BeautifulSoup(page["html"], "lxml")
-                iframes = iframe_soup.find_all("iframe", src=True) or iframe_soup.find_all("frame", src=True)
-                if iframes:
-                    logger.info("检测到 %d 个 iframe/frame，正在追加爬取...", len(iframes))
-                    for idx, ifr in enumerate(iframes):
-                        iframe_url = urljoin(url, ifr["src"])
-                        logger.info("iframe[%d] src=%s", idx, iframe_url)
-                        self._progress = f"Layer 1: 正在爬取 iframe({idx+1}/{len(iframes)})..."
-                        iframe_page = await _scrape_page(client, iframe_url)
-                        if iframe_page["html"]:
-                            page["html"] += f"\n<!-- iframe {idx} content -->\n" + iframe_page["html"]
-                            logger.info("iframe[%d] 爬取成功: 追加 html_len=%d", idx, len(iframe_page["html"]))
-                        else:
-                            logger.warning("iframe[%d] 爬取失败: status=%s", idx, iframe_page["status"])
-                    logger.info("iframe 全部爬取完成, 合并后 html_len=%d", len(page["html"]))
+    async def get_results(self, task_id: str) -> list:
+        raw = await self.redis.hget(_task_key(task_id), "results")
+        return json.loads(raw) if raw else []
 
-                self._progress = "Layer 1: AI 正在识别文章链接..."
-                articles_info = await extract_article_links(page["html"], url)
-                if not articles_info:
-                    self._status = "failed"
-                    self._progress = "未能识别到任何文章链接，请检查目标页面结构"
-                    return
-                self._progress = f"Layer 1 完成: 识别到 {len(articles_info)} 篇文章"
+    async def get_summary(self, task_id: str) -> str:
+        return await self.redis.hget(_task_key(task_id), "summary") or ""
 
-                # ---- Layer 2: 批量爬取文章 ----
-                article_urls = [a["url"] for a in articles_info]
-                self._progress = f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章..."
-                batch_results = await batch_scrape_articles(client, article_urls)
-
-                # ---- AI 内容清洗 ----
-                self._progress = "正在 AI 清洗文章内容..."
-                cleaned = await ai_clean_all_contents(batch_results)
-
-                merged = []
-                for i, info in enumerate(articles_info):
-                    item = {"title": info["title"], "url": info["url"], "content": None}
-                    if i < len(batch_results):
-                        item["content"] = batch_results[i]
-                    if i < len(cleaned):
-                        item["cleaned"] = cleaned[i]
-                    merged.append(item)
-
-                self._results = merged
-                self._status = "finished"
-                self._progress = f"爬取完成: 共 {len(merged)} 篇文章"
-
-                # ---- AI 摘要 ----
-                if merged:
-                    self._progress = "正在生成 AI 摘要..."
-                    titles = [m.get("cleaned", {}).get("title", m["title"]) for m in merged]
-                    self._summary = await ai_generate_summary(titles)
-                    self._progress = f"全部完成: {len(merged)} 篇文章 + AI 摘要"
-
-            except Exception as e:
-                self._status = "failed"
-                self._progress = f"爬取出错: {e}"
-                logger.exception("爬取过程发生异常")
+    async def store_results(self, task_id: str, links: list, results: list, summary: str):
+        """存储爬取结果"""
+        await self.redis.hset(
+            _task_key(task_id),
+            mapping={
+                "links": json.dumps(links, ensure_ascii=False),
+                "results": json.dumps(results, ensure_ascii=False),
+                "summary": summary,
+            },
+        )
 
 
-crawler_service = GovCrawlerService()
+# ==================== 工作进程 ====================
+
+
+async def execute_crawl(task_id: str, url: str):
+    """执行单个爬取任务"""
+    await task_manager.update_task(task_id, status="running", progress="Layer 1: 正在爬取列表页...")
+
+    all_links = []
+    merged = []
+    summary = ""
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        try:
+            # ---- Layer 1 ----
+            await task_manager.update_task(task_id, progress="Layer 1: 正在爬取列表页...")
+            logger.info("=== Layer 1: 爬取列表页 === task=%s", task_id)
+            page = await _scrape_page(client, url)
+            if page["status"] != "finished" or not page["html"]:
+                raise RuntimeError(f"列表页爬取失败: {page['status']}")
+            logger.info("列表页爬取成功: html_len=%d", len(page["html"]))
+
+            # ---- iframe ----
+            iframe_soup = BeautifulSoup(page["html"], "lxml")
+            iframes = iframe_soup.find_all("iframe", src=True) or iframe_soup.find_all("frame", src=True)
+            if iframes:
+                logger.info("检测到 %d 个 iframe/frame", len(iframes))
+                for idx, ifr in enumerate(iframes):
+                    iframe_url = urljoin(url, ifr["src"])
+                    await task_manager.update_task(task_id, progress=f"Layer 1: 正在爬取 iframe({idx+1}/{len(iframes)})...")
+                    iframe_page = await _scrape_page(client, iframe_url)
+                    if iframe_page["html"]:
+                        page["html"] += f"\n<!-- iframe {idx} content -->\n" + iframe_page["html"]
+                logger.info("iframe 全部爬取完成, 合并后 html_len=%d", len(page["html"]))
+
+            # ---- AI 识别 ----
+            await task_manager.update_task(task_id, progress="Layer 1: AI 正在识别文章链接...")
+            articles_info = await extract_article_links(page["html"], url)
+            if not articles_info:
+                raise RuntimeError("未能识别到任何文章链接")
+
+            all_links = [{"title": a["title"], "url": a["url"]} for a in articles_info]
+            logger.info("识别到 %d 篇文章", len(all_links))
+
+            # ---- Layer 2 ----
+            article_urls = [a["url"] for a in articles_info]
+            if len(article_urls) > 30:
+                logger.info("文章数 %d 超过上限 30, 截取前30篇", len(article_urls))
+                article_urls = article_urls[:30]
+
+            await task_manager.update_task(
+                task_id,
+                progress=f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章（共识别到 {len(all_links)} 篇）...",
+            )
+            batch_results = await batch_scrape_articles(client, article_urls)
+
+            # ---- AI 清洗 ----
+            await task_manager.update_task(task_id, progress="正在 AI 清洗文章内容...")
+            cleaned = await ai_clean_all_contents(batch_results)
+
+            for i, info in enumerate(articles_info):
+                item = {"title": info["title"], "url": info["url"], "content": None}
+                if i < len(batch_results):
+                    item["content"] = batch_results[i]
+                if i < len(cleaned):
+                    item["cleaned"] = cleaned[i]
+                merged.append(item)
+
+            # ---- AI 摘要 ----
+            if merged:
+                await task_manager.update_task(task_id, progress="正在生成 AI 摘要...")
+                titles = [m.get("cleaned", {}).get("title", m["title"]) for m in merged]
+                summary = await ai_generate_summary(titles)
+
+            # ---- 存储结果 ----
+            await task_manager.store_results(task_id, all_links, merged, summary)
+            await task_manager.update_task(
+                task_id,
+                status="finished",
+                progress=f"全部完成: {len(merged)} 篇文章 + AI 摘要",
+            )
+            logger.info("任务完成: task_id=%s, 文章=%d", task_id, len(merged))
+
+        except Exception as e:
+            logger.exception("爬取过程发生异常: task_id=%s", task_id)
+            await task_manager.update_task(task_id, status="failed", progress=f"爬取出错: {e}")
+
+
+async def worker(worker_id: int):
+    """工作进程：从队列取任务并执行"""
+    logger.info("Worker[%d] 已启动", worker_id)
+    while True:
+        try:
+            _, task_id = await task_manager.redis.brpop(QUEUE_KEY, timeout=0)
+            logger.info("Worker[%d] 取到任务: %s", worker_id, task_id)
+            task = await task_manager.get_task(task_id)
+            if not task:
+                logger.warning("Worker[%d] 任务不存在: %s", worker_id, task_id)
+                continue
+            url = task.get("url", "")
+            await execute_crawl(task_id, url)
+        except Exception as e:
+            logger.error("Worker[%d] 异常: %s", worker_id, e)
+            await asyncio.sleep(5)
+
+
+async def start_workers():
+    """启动所有工作进程"""
+    await task_manager.init()
+    tasks = [asyncio.create_task(worker(i), name=f"worker-{i}") for i in range(WORKER_COUNT)]
+    logger.info("已启动 %d 个工作进程", WORKER_COUNT)
+    await asyncio.gather(*tasks)
+
+
+task_manager = TaskManager()

@@ -20,17 +20,20 @@ h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
 .btn-success { background: #2ecc71; color: #fff; }
 .btn-danger { background: #e74c3c; color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 12px; border-radius: 8px; }
+.status-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 12px; border-radius: 8px; flex-wrap: wrap; }
 .status-idle { background: #e8f4fd; color: #2196F3; }
+.status-pending { background: #f3e5f5; color: #9c27b0; }
 .status-running { background: #fff3e0; color: #ff9800; }
 .status-finished { background: #e8f5e9; color: #4caf50; }
 .status-failed { background: #fbe9e7; color: #f44336; }
 .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .dot-idle { background: #2196F3; }
+.dot-pending { background: #9c27b0; }
 .dot-running { background: #ff9800; animation: pulse 1s infinite; }
 .dot-finished { background: #4caf50; }
 .dot-failed { background: #f44336; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.task-id-tag { font-size: 12px; background: #e0e0e0; padding: 2px 8px; border-radius: 4px; font-family: monospace; }
 .article-list { list-style: none; }
 .article-item { border-bottom: 1px solid #eee; padding: 12px 0; }
 .article-item:last-child { border-bottom: none; }
@@ -69,10 +72,11 @@ h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
       <span id="statusDot" class="status-dot dot-idle"></span>
       <span id="statusText">就绪</span>
       <span id="progressText" style="margin-left:12px;font-size:13px;"></span>
+      <span id="taskIdTag" class="task-id-tag" style="display:none;"></span>
     </div>
     <div style="display:flex;gap:12px;">
       <button class="btn btn-primary" id="btnCrawl" onclick="startCrawl()">开始爬取</button>
-      <button class="btn btn-danger" id="btnRefresh" onclick="refreshStatus()">刷新状态</button>
+      <button class="btn btn-danger" id="btnRefresh" onclick="refreshResults()">刷新结果</button>
     </div>
   </div>
 
@@ -86,8 +90,9 @@ h1 { text-align: center; margin-bottom: 24px; color: #1a1a2e; }
 
 <script>
 let pollTimer = null;
+let currentTaskId = null;
 
-const STATUS_LABELS = { idle: '就绪', running: '运行中', finished: '已完成', failed: '失败' };
+const STATUS_LABELS = { idle: '就绪', pending: '排队中', running: '运行中', finished: '已完成', failed: '失败' };
 
 async function loadSources() {
   try {
@@ -97,13 +102,12 @@ async function loadSources() {
     for (const src of data.sources) {
       const opt = document.createElement('option');
       opt.value = src.url;
-      opt.textContent = src.label;
-      opt.title = src.desc;
+      opt.textContent = src.label || src.name;
+      opt.title = src.desc || '';
       select.appendChild(opt);
     }
   } catch(e) {
     console.error('加载站点列表失败:', e);
-    // 预设站点列表（接口不可用时的备用）
     const sources = [
       { label: '财政部税政司 - 政策发布', url: 'https://szs.mof.gov.cn/zhengcefabu/' },
       { label: '中央网信办 - 网信发布', url: 'https://www.cac.gov.cn/wxzw/wxfb/A093702index_1.htm' },
@@ -143,7 +147,7 @@ async function startCrawl() {
 
   const btn = document.getElementById('btnCrawl');
   btn.disabled = true;
-  btn.textContent = '启动中...';
+  btn.textContent = '提交中...';
 
   try {
     const resp = await fetch('/api/crawl', {
@@ -152,12 +156,13 @@ async function startCrawl() {
       body: JSON.stringify({ url: url }),
     });
     const data = await resp.json();
-    if (resp.status === 409) {
-      alert('爬取任务已在运行中，请等待完成');
-      btn.disabled = false;
-      btn.textContent = '开始爬取';
-      return;
-    }
+
+    currentTaskId = data.task_id;
+    document.getElementById('taskIdTag').textContent = 'Task: ' + currentTaskId;
+    document.getElementById('taskIdTag').style.display = 'inline-block';
+
+    btn.textContent = '爬取中...';
+    updateStatusBar('pending', '任务已加入队列');
     startPolling();
   } catch(e) {
     alert('启动失败: ' + e.message);
@@ -168,25 +173,25 @@ async function startCrawl() {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(refreshStatus, 3000);
-  refreshStatus();
+  pollTimer = setInterval(pollStatus, 3000);
+  pollStatus();
 }
 
-async function refreshStatus() {
+async function pollStatus() {
+  if (!currentTaskId) return;
   try {
-    const resp = await fetch('/api/status');
+    const resp = await fetch('/api/status?task_id=' + currentTaskId);
     const data = await resp.json();
     updateStatusBar(data.status, data.progress);
 
     const btn = document.getElementById('btnCrawl');
-    if (data.status === 'running') {
+    if (data.status === 'pending' || data.status === 'running') {
       btn.disabled = true;
       btn.textContent = '爬取中...';
-      if (!pollTimer) startPolling();
     } else {
       btn.disabled = false;
       btn.textContent = '开始爬取';
-      if (pollTimer && data.status !== 'running') {
+      if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
@@ -196,8 +201,16 @@ async function refreshStatus() {
       await loadResults();
     }
   } catch(e) {
-    console.error('刷新状态失败:', e);
+    console.error('轮询状态失败:', e);
   }
+}
+
+async function refreshResults() {
+  if (!currentTaskId) {
+    document.getElementById('resultsArea').innerHTML = '<p style="color:#888;">请先启动一次爬取</p>';
+    return;
+  }
+  await pollStatus();
 }
 
 function updateStatusBar(status, progress) {
@@ -206,15 +219,16 @@ function updateStatusBar(status, progress) {
   const text = document.getElementById('statusText');
   const prog = document.getElementById('progressText');
 
-  bar.className = 'status-bar status-' + status;
-  dot.className = 'status-dot dot-' + status;
-  text.textContent = STATUS_LABELS[status] || status;
+  bar.className = 'status-bar status-' + (status || 'idle');
+  dot.className = 'status-dot dot-' + (status || 'idle');
+  text.textContent = STATUS_LABELS[status] || status || '就绪';
   prog.textContent = progress || '';
 }
 
 async function loadResults() {
+  if (!currentTaskId) return;
   try {
-    const resp = await fetch('/api/results');
+    const resp = await fetch('/api/results?task_id=' + currentTaskId);
     const data = await resp.json();
     renderAll(data.summary, data.results);
   } catch(e) {
@@ -293,7 +307,6 @@ function escapeHtml(str) {
 }
 
 loadSources();
-refreshStatus();
 </script>
 </body>
 </html>
