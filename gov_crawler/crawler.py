@@ -461,22 +461,22 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
         if not raw or len(raw) < 50:
             texts.append(f"[{i}] (内容不足)")
         else:
-            texts.append(f"[{i}]\n{raw[:1500]}")
+            texts.append(f"[{i}]\n{raw[:5000]}")
 
     batch_text = "\n\n=====\n\n".join(texts)
 
-    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的原始网页内容，每篇文章以 [{i}] 标记开头，包含大量导航栏、页眉、页脚等无关信息。
+    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页正文内容，每篇文章以 [数字] 标记开头，可能仍混有少量无关信息。
 
 请对每篇文章分别提取结构化信息，规则：
 - title: 文章标题
 - publish_date: 发布日期（如果有，格式 YYYY-MM-DD）
 - source: 发布单位/来源（如果有）
-- body: 正文内容（只保留文章主体文字，去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、广告等所有无关内容）
+- body: 正文内容（只保留文章主体文字，去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、分享按钮、广告等所有无关内容）
 
 要求：
 - 每篇文章独立处理
 - 如果某字段不存在则设为空字符串 ""
-- body 保留原文的自然段落结构
+- body 保留原文的自然段落结构，不要省略
 - 只返回 JSON 数组，不要任何其他文字
 
 内容如下：
