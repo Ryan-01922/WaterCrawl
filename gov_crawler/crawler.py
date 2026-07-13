@@ -475,25 +475,29 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
 
     batch_text = "\n\n=====\n\n".join(texts)
 
-    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页正文内容，每篇文章以 [数字] 标记开头，可能仍混有少量无关信息。
+    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页全文，每篇以 "=====" 分隔。
 
-请对每篇文章分别提取结构化信息，规则：
-- title: 文章标题
-- publish_date: 发布日期（如果有，格式 YYYY-MM-DD）
-- source: 发布单位/来源（如果有）
-- body: 正文内容（只保留文章主体文字，去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、分享按钮、广告等所有无关内容）
+请对每篇文章：去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、分享按钮等无关内容，只保留正文。
 
-要求：
-- 每篇文章独立处理
-- 如果某字段不存在则设为空字符串 ""
-- body 保留原文的自然段落结构，不要省略
-- 只返回 JSON 数组，不要任何其他文字
+然后按以下格式回复（每篇文章之间用 "===" 分隔）：
+
+TTL: 文章标题
+DTM: 发文日期（如有，格式 YYYY-MM-DD）
+SRC: 发布单位/来源（如有，无则留空）
+BOD:
+正文内容...
+
+===
+TTL: 下一篇文章标题
+...
+
+注意：
+- TTL/BOD 必须有，DTM/SRC 没有则留空即可
+- BOD 后的正文保留原文段落，不要省略
+- 不要加任何其他说明文字
 
 内容如下：
-{batch_text}
-
-严格按以下 JSON 格式返回（不要 markdown 代码块标记，只返回纯 JSON）：
-[{{"title": "...", "publish_date": "...", "source": "...", "body": "..."}}, ...]"""
+{batch_text}"""
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         try:
@@ -512,43 +516,36 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
             )
             resp.raise_for_status()
             data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            logger.info("[清洗] AI 原始响应 (前500字符): %s", content[:500].replace("\n", "\\n"))
+            raw_response = data["choices"][0]["message"]["content"].strip()
+            logger.info("[清洗] AI 响应 (前200字符): %s", raw_response[:200].replace("\n", "\\n"))
 
-            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
-            try:
-                cleaned_list = json.loads(content)
-            except json.JSONDecodeError:
-                logger.warning("[清洗] 整体 JSON 解析失败，尝试 raw_decode 逐条提取")
-                # 用 json.JSONDecoder.raw_decode 逐个对象解析
-                decoder = json.JSONDecoder()
-                idx = 0
-                cleaned_list = []
-                # 去掉数组括号 [ ]
-                content = content.strip()
-                if content.startswith("["):
-                    content = content[1:]
-                if content.endswith("]"):
-                    content = content[:-1]
-                while idx < len(content):
-                    ch = content[idx]
-                    if ch in " \t\n\r,":
-                        idx += 1
-                        continue
-                    if ch == "]":
-                        break
-                    try:
-                        obj, end = decoder.raw_decode(content, idx)
-                        if isinstance(obj, dict) and "title" in obj:
-                            cleaned_list.append(obj)
-                        idx = end
-                    except json.JSONDecodeError:
-                        idx += 1
-                logger.info("[清洗] raw_decode 逐条提取到 %d 篇", len(cleaned_list))
-            if isinstance(cleaned_list, list):
-                logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
-                return cleaned_list
-            return []
+            # 按 === 分割每篇文章
+            blocks = [b.strip() for b in raw_response.split("===") if b.strip()]
+            cleaned_list = []
+            for block in blocks:
+                lines = block.strip().split("\n")
+                item = {"title": "", "publish_date": "", "source": "", "body": ""}
+                current_field = None
+                for line in lines:
+                    if line.startswith("TTL:"):
+                        item["title"] = line[4:].strip()
+                        current_field = None
+                    elif line.startswith("DTM:"):
+                        item["publish_date"] = line[4:].strip()
+                        current_field = None
+                    elif line.startswith("SRC:"):
+                        item["source"] = line[4:].strip()
+                        current_field = None
+                    elif line.startswith("BOD:"):
+                        current_field = "body"
+                    elif current_field == "body":
+                        item["body"] += line + "\n"
+                item["body"] = item["body"].strip()
+                if item["title"]:
+                    cleaned_list.append(item)
+
+            logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
+            return cleaned_list
         except Exception as e:
             logger.warning("[清洗] AI 批量清洗失败: %s", e)
             return []
