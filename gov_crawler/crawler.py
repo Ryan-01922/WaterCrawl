@@ -355,9 +355,6 @@ def fallback_extract_article_links(html: str, base_url: str) -> list[dict]:
             continue
         if _is_attachment_url(full_url):
             continue
-        # 排除栏目/频道页（非文章页）
-        if re.search(r"/col/col\d", full_url):
-            continue
         # 启发式：文章 URL 通常比栏目首页更深、更长
         if full_url == base_url or full_url.rstrip("/") == base_url.rstrip("/"):
             continue
@@ -600,13 +597,31 @@ class GovCrawlerService:
                 # ---- Layer 1: 爬取列表页 + AI 识别文章链接 ----
                 self._progress = "Layer 1: 正在爬取列表页..."
                 logger.info("=== Layer 1: 爬取列表页 ===")
-                page = await _scrape_page(client, url, {"wait_time": 8000, "timeout": 60000})
+                page = await _scrape_page(client, url)
                 if page["status"] != "finished" or not page["html"]:
                     self._status = "failed"
                     self._progress = f"列表页爬取失败 (status={page['status']}, html_len={len(page.get('html',''))})"
                     logger.error("列表页爬取失败: status=%s, html_len=%d", page["status"], len(page.get("html", "")))
                     return
                 logger.info("列表页爬取成功: html_len=%d", len(page["html"]))
+                logger.info("列表页 HTML 前500字符: %s", page["html"][:500].replace("\n", " "))
+
+                # ---- iframe 检测与追加爬取 ----
+                iframe_soup = BeautifulSoup(page["html"], "lxml")
+                iframes = iframe_soup.find_all("iframe", src=True) or iframe_soup.find_all("frame", src=True)
+                if iframes:
+                    logger.info("检测到 %d 个 iframe/frame，正在追加爬取...", len(iframes))
+                    for idx, ifr in enumerate(iframes):
+                        iframe_url = urljoin(url, ifr["src"])
+                        logger.info("iframe[%d] src=%s", idx, iframe_url)
+                        self._progress = f"Layer 1: 正在爬取 iframe({idx+1}/{len(iframes)})..."
+                        iframe_page = await _scrape_page(client, iframe_url)
+                        if iframe_page["html"]:
+                            page["html"] += f"\n<!-- iframe {idx} content -->\n" + iframe_page["html"]
+                            logger.info("iframe[%d] 爬取成功: 追加 html_len=%d", idx, len(iframe_page["html"]))
+                        else:
+                            logger.warning("iframe[%d] 爬取失败: status=%s", idx, iframe_page["status"])
+                    logger.info("iframe 全部爬取完成, 合并后 html_len=%d", len(page["html"]))
 
                 self._progress = "Layer 1: AI 正在识别文章链接..."
                 articles_info = await extract_article_links(page["html"], url)
