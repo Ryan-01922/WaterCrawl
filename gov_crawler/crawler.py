@@ -465,7 +465,7 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
 
     batch_text = "\n\n=====\n\n".join(texts)
 
-    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页正文内容，每篇文章以 [数字] 标记开头，可能仍混有少量无关信息。
+    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页源码内容，每篇用 ===== 分隔，包含标题栏、导航栏、正文、页脚等混合信息。
 
 请对每篇文章分别提取结构化信息，规则：
 - title: 文章标题
