@@ -214,54 +214,53 @@ async function loadResults() {
   try {
     const resp = await fetch('/api/results');
     const data = await resp.json();
-    renderSummary(data.summary);
-    renderResults(data.results);
+    renderAll(data.summary, data.results);
   } catch(e) {
     document.getElementById('resultsArea').innerHTML = '<p style="color:red;">加载结果失败: ' + e.message + '</p>';
   }
 }
 
-function renderSummary(summary) {
-  const area = document.getElementById('resultsArea');
-  if (!summary) return;
-  area.innerHTML = '<div class="summary-box"><div class="summary-label">AI 摘要</div><div>' + escapeHtml(summary) + '</div></div>';
-}
-
-function renderResults(results) {
+function renderAll(summary, results) {
   const area = document.getElementById('resultsArea');
   const countEl = document.getElementById('resultCount');
+  let html = '';
 
+  // 摘要卡片
+  if (summary) {
+    html += '<div class="summary-box"><div class="summary-label">AI 摘要</div><div>' + escapeHtml(summary) + '</div></div>';
+  }
+
+  // 文章列表
   if (!results || results.length === 0) {
-    area.innerHTML = '<p style="color:#888;">暂无结果</p>';
+    html += '<p style="color:#888;">暂无结果</p>';
     countEl.textContent = '0';
-    return;
-  }
-
-  countEl.textContent = results.length;
-
-  let html = '<ul class="article-list">';
-  for (const a of results) {
-    html += '<li class="article-item">';
-    html += '<div class="article-title">' + escapeHtml(a.title || '无标题') + '</div>';
-    html += '<div class="article-url">' + escapeHtml(a.url || '') + '</div>';
-    if (a.content && a.content.result) {
-      const inner = a.content.result;
-      let text = '';
-      if (typeof inner === 'string') {
-        text = inner;
-      } else if (inner.markdown) {
-        text = inner.markdown;
-      } else if (inner.html) {
-        text = inner.html.replace(/<[^>]*>/g, '').trim();
-      } else {
-        text = JSON.stringify(inner);
+  } else {
+    countEl.textContent = results.length;
+    html += '<ul class="article-list">';
+    for (const a of results) {
+      html += '<li class="article-item">';
+      html += '<div class="article-title">' + escapeHtml(a.title || '无标题') + '</div>';
+      html += '<div class="article-url">' + escapeHtml(a.url || '') + '</div>';
+      if (a.content && a.content.result) {
+        const inner = a.content.result;
+        let text = '';
+        if (typeof inner === 'string') {
+          text = inner;
+        } else if (inner.markdown) {
+          text = inner.markdown;
+        } else if (inner.html) {
+          text = inner.html.replace(/<[^>]*>/g, '').trim();
+        } else {
+          text = JSON.stringify(inner);
+        }
+        html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看内容</summary>';
+        html += '<div class="article-content">' + escapeHtml(text).substring(0, 3000) + '</div></details>';
       }
-      html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看内容</summary>';
-      html += '<div class="article-content">' + escapeHtml(text).substring(0, 3000) + '</div></details>';
+      html += '</li>';
     }
-    html += '</li>';
+    html += '</ul>';
   }
-  html += '</ul>';
+
   area.innerHTML = html;
 }
 
