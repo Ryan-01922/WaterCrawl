@@ -355,6 +355,9 @@ def fallback_extract_article_links(html: str, base_url: str) -> list[dict]:
             continue
         if _is_attachment_url(full_url):
             continue
+        # 排除栏目/频道页（非文章页）
+        if re.search(r"/col/col\d", full_url):
+            continue
         # 启发式：文章 URL 通常比栏目首页更深、更长
         if full_url == base_url or full_url.rstrip("/") == base_url.rstrip("/"):
             continue
@@ -597,7 +600,7 @@ class GovCrawlerService:
                 # ---- Layer 1: 爬取列表页 + AI 识别文章链接 ----
                 self._progress = "Layer 1: 正在爬取列表页..."
                 logger.info("=== Layer 1: 爬取列表页 ===")
-                page = await _scrape_page(client, url)
+                page = await _scrape_page(client, url, {"wait_time": 8000, "timeout": 60000})
                 if page["status"] != "finished" or not page["html"]:
                     self._status = "failed"
                     self._progress = f"列表页爬取失败 (status={page['status']}, html_len={len(page.get('html',''))})"
