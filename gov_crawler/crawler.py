@@ -433,6 +433,87 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
     return enriched
 
 
+# ==================== AI 内容清洗 ====================
+
+def _extract_raw_text(article_data: dict) -> str:
+    """从爬取结果中提取可读文本（优先 markdown，退回到 html）"""
+    result = article_data.get("result", {})
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        md = result.get("markdown", "")
+        if md:
+            return md
+        html = result.get("html", "")
+        if html:
+            return BeautifulSoup(html, "lxml").get_text(" ", strip=True)
+    return ""
+
+
+async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
+    """使用 Qwen3 批量清洗所有文章内容，提取结构化信息"""
+    if not articles_data:
+        return []
+
+    texts = []
+    for i, ad in enumerate(articles_data):
+        raw = _extract_raw_text(ad)
+        if not raw or len(raw) < 50:
+            texts.append(f"[{i}] (内容不足)")
+        else:
+            texts.append(f"[{i}]\n{raw[:1500]}")
+
+    batch_text = "\n\n=====\n\n".join(texts)
+
+    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的原始网页内容，每篇文章以 [{i}] 标记开头，包含大量导航栏、页眉、页脚等无关信息。
+
+请对每篇文章分别提取结构化信息，规则：
+- title: 文章标题
+- publish_date: 发布日期（如果有，格式 YYYY-MM-DD）
+- source: 发布单位/来源（如果有）
+- body: 正文内容（只保留文章主体文字，去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、广告等所有无关内容）
+
+要求：
+- 每篇文章独立处理
+- 如果某字段不存在则设为空字符串 ""
+- body 保留原文的自然段落结构
+- 只返回 JSON 数组，不要任何其他文字
+
+内容如下：
+{batch_text}
+
+严格按以下 JSON 格式返回（不要 markdown 代码块标记，只返回纯 JSON）：
+[{{"title": "...", "publish_date": "...", "source": "...", "body": "..."}}, ...]"""
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        try:
+            resp = await client.post(
+                f"{GPUSTACK_API_BASE}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GPUSTACK_API_KEY}".encode("utf-8"),
+                    "Content-Type": b"application/json",
+                },
+                json={
+                    "model": GPUSTACK_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
+            cleaned_list = json.loads(content)
+            if isinstance(cleaned_list, list):
+                logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
+                return cleaned_list
+            return []
+        except Exception as e:
+            logger.warning("[清洗] AI 批量清洗失败: %s", e)
+            return []
+
+
 # ==================== AI 摘要生成 ====================
 
 async def ai_generate_summary(titles: list[str]) -> str:
@@ -537,11 +618,17 @@ class GovCrawlerService:
                 self._progress = f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章..."
                 batch_results = await batch_scrape_articles(client, article_urls)
 
+                # ---- AI 内容清洗 ----
+                self._progress = "正在 AI 清洗文章内容..."
+                cleaned = await ai_clean_all_contents(batch_results)
+
                 merged = []
                 for i, info in enumerate(articles_info):
                     item = {"title": info["title"], "url": info["url"], "content": None}
                     if i < len(batch_results):
                         item["content"] = batch_results[i]
+                    if i < len(cleaned):
+                        item["cleaned"] = cleaned[i]
                     merged.append(item)
 
                 self._results = merged
@@ -551,7 +638,7 @@ class GovCrawlerService:
                 # ---- AI 摘要 ----
                 if merged:
                     self._progress = "正在生成 AI 摘要..."
-                    titles = [m["title"] for m in merged if m.get("title")]
+                    titles = [m.get("cleaned", {}).get("title", m["title"]) for m in merged]
                     self._summary = await ai_generate_summary(titles)
                     self._progress = f"全部完成: {len(merged)} 篇文章 + AI 摘要"
 
