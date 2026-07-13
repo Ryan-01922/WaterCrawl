@@ -513,6 +513,9 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
+            # 日志：前 500 字符
+            logger.info("[清洗] AI 原始响应 (前500字符): %s", content[:500].replace("\n", "\\n"))
+
             # 健壮 JSON 提取：先找 [ ... ] 包围的数组部分
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
             array_match = re.search(r"\[.*\]", content, re.DOTALL)
@@ -520,17 +523,24 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
                 content = array_match.group()
             try:
                 cleaned_list = json.loads(content)
-            except json.JSONDecodeError:
-                # 如果整体解析失败，逐个提取 {…} 对象
-                logger.warning("[清洗] 整体 JSON 解析失败，尝试逐条提取")
-                obj_pattern = re.compile(r'\{"title":\s*"[^"]*",\s*"publish_date":\s*"[^"]*",\s*"source":\s*"[^"]*",\s*"body":\s*"[^"]*"\}', re.DOTALL)
+            except json.JSONDecodeError as json_err:
+                # 如果整体解析失败，逐条提取 {…} 对象（允许 body 跨行）
+                logger.warning("[清洗] 整体 JSON 解析失败(%.60s)，尝试逐条提取", str(json_err))
                 cleaned_list = []
-                for match in obj_pattern.finditer(content):
-                    try:
-                        cleaned_list.append(json.loads(match.group()))
-                    except json.JSONDecodeError:
-                        continue
-                logger.info("[清洗] 逐条提取到 %d 篇", len(cleaned_list))
+                # 逐条正则: 匹配 "title": "..." 开头的对象，body 字段允许含 \" 转义
+                lines = content.split("\n")
+                buf = ""
+                for line in lines:
+                    buf += line.strip()
+                    if buf.endswith("}") and buf.count("{") == buf.count("}"):
+                        try:
+                            obj = json.loads(buf)
+                            if isinstance(obj, dict) and "title" in obj:
+                                cleaned_list.append(obj)
+                        except json.JSONDecodeError:
+                            pass
+                        buf = ""
+                logger.info("[清洗] 逐行提取到 %d 篇", len(cleaned_list))
             if isinstance(cleaned_list, list):
                 logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
                 return cleaned_list
