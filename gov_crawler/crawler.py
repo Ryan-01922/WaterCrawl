@@ -786,14 +786,20 @@ async def start_workers():
         t = asyncio.create_task(worker(i), name=f"worker-{i}")
         worker_tasks.append(t)
     logger.info("已启动 %d 个工作进程", WORKER_COUNT)
-    # 用 wait 而非 gather：一个 Worker 崩溃不影响其他
+    # 用 wait：检测到任何 Worker 退出时，取消其他 Worker 并整体重启
     done, pending = await asyncio.wait(worker_tasks, return_when=asyncio.FIRST_EXCEPTION)
     for t in done:
         exc = t.exception()
         if exc:
             logger.critical("Worker 异常退出: %s", exc)
-    # 理论上不会到这，到了就重启
-    logger.critical("所有 Worker 已停止，5 秒后尝试重启...")
+    # 取消仍在运行的 Worker，避免重复进程
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    logger.critical("所有 Worker 已停止，5 秒后重启...")
     await asyncio.sleep(5)
     asyncio.create_task(start_workers(), name="workers-restart")
 
