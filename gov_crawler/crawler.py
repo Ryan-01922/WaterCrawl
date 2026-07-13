@@ -45,6 +45,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "3"))
 QUEUE_KEY = "gov_crawler:queue"
 TASK_PREFIX = "gov_crawler:task:"
+TASK_TTL = 86400  # 任务数据 24 小时后过期
 
 # 预设站点
 PRESET_SOURCES = [
@@ -586,9 +587,7 @@ async def ai_generate_summary(titles: list[str]) -> str:
 
 # ==================== Redis 任务队列 ====================
 
-def _task_key(task_id: str, field: str = "") -> str:
-    if field:
-        return f"{TASK_PREFIX}{task_id}:{field}"
+def _task_key(task_id: str) -> str:
     return f"{TASK_PREFIX}{task_id}"
 
 
@@ -624,6 +623,8 @@ class TaskManager:
             },
         )
         await self.redis.rpush(QUEUE_KEY, task_id)
+        # 设置过期时间，防止内存泄漏
+        await self.redis.expire(_task_key(task_id), TASK_TTL)
         logger.info("任务已入队: task_id=%s, url=%s", task_id, url)
         return task_id
 
@@ -767,11 +768,23 @@ async def worker(worker_id: int):
 
 
 async def start_workers():
-    """启动所有工作进程"""
+    """启动所有工作进程（独立运行，互不影响）"""
     await task_manager.init()
-    tasks = [asyncio.create_task(worker(i), name=f"worker-{i}") for i in range(WORKER_COUNT)]
+    worker_tasks = []
+    for i in range(WORKER_COUNT):
+        t = asyncio.create_task(worker(i), name=f"worker-{i}")
+        worker_tasks.append(t)
     logger.info("已启动 %d 个工作进程", WORKER_COUNT)
-    await asyncio.gather(*tasks)
+    # 用 wait 而非 gather：一个 Worker 崩溃不影响其他
+    done, pending = await asyncio.wait(worker_tasks, return_when=asyncio.FIRST_EXCEPTION)
+    for t in done:
+        exc = t.exception()
+        if exc:
+            logger.critical("Worker 异常退出: %s", exc)
+    # 理论上不会到这，到了就重启
+    logger.critical("所有 Worker 已停止，5 秒后尝试重启...")
+    await asyncio.sleep(5)
+    asyncio.create_task(start_workers(), name="workers-restart")
 
 
 task_manager = TaskManager()
