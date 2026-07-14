@@ -41,7 +41,17 @@ GPUSTACK_API_KEY = os.getenv("GPUSTACK_API_KEY", "")
 GPUSTACK_MODEL = os.getenv("GPUSTACK_MODEL", "qwen3-32b")
 
 # ---- Redis / Task Queue ----
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+_REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+_REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+_REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+_REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+_REDIS_URL = os.getenv("REDIS_URL", "")
+if not _REDIS_URL:
+    if _REDIS_PASSWORD:
+        _REDIS_URL = f"redis://:{_REDIS_PASSWORD}@{_REDIS_HOST}:{_REDIS_PORT}/{_REDIS_DB}"
+    else:
+        _REDIS_URL = f"redis://{_REDIS_HOST}:{_REDIS_PORT}/{_REDIS_DB}"
+REDIS_URL = _REDIS_URL
 WORKER_COUNT = int(os.getenv("WORKER_COUNT", "3"))
 QUEUE_KEY = "gov_crawler:queue"
 TASK_PREFIX = "gov_crawler:task:"

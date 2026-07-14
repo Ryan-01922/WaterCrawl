@@ -6,15 +6,11 @@ services:
       - "7107:7107"
     env_file: .env
     environment:
-      - REDIS_URL=redis://gov-redis:6379/0
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=16379
+      - REDIS_DB=0
+      - REDIS_PASSWORD=mypassword123
       - WORKER_COUNT=3
-    depends_on:
-      - gov-redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-  gov-redis:
-    image: redis:7-alpine
-    container_name: gov-redis
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6380:6379"
