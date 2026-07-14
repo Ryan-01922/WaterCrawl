@@ -272,10 +272,10 @@ function renderAll(summary, results) {
 
       html += '<div class="article-url">' + escapeHtml(a.url || '') + '</div>';
 
-      // 优先显示清洗后的正文
+      // 显示 AI 生成的摘要
       if (a.cleaned && a.cleaned.body) {
-        html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看正文</summary>';
-        html += '<div class="article-content">' + escapeHtml(a.cleaned.body).substring(0, 3000) + '</div></details>';
+        html += '<details><summary style="cursor:pointer;color:#4361ee;font-size:13px;">查看摘要 (AI)</summary>';
+        html += '<div class="article-content">' + escapeHtml(a.cleaned.body) + '</div></details>';
       } else if (a.content && a.content.result) {
         const inner = a.content.result;
         let text = '';

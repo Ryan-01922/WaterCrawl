@@ -487,23 +487,22 @@ async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
 
     prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页全文，每篇以 "=====" 分隔。
 
-请对每篇文章：去掉导航、页眉、页脚、侧边栏、搜索框、版权声明、分享按钮等无关内容，只保留正文。
+请对每篇文章：先生成一段 200 字以内的摘要，概括文章核心内容。
 
-然后按以下格式回复（每篇文章之间用 "===" 分隔）：
+按以下格式回复（每篇文章之间用 "===" 分隔）：
 
 TTL: 文章标题
 DTM: 发文日期（如有，格式 YYYY-MM-DD）
 SRC: 发布单位/来源（如有，无则留空）
-BOD:
-正文内容...
+ABS:
+摘要内容（200字以内）
 
 ===
 TTL: 下一篇文章标题
 ...
 
 注意：
-- TTL/BOD 必须有，DTM/SRC 没有则留空即可
-- BOD 后的正文保留原文段落，不要省略
+- TTL/ABS 必须有，DTM/SRC 没有则留空即可
 - 不要加任何其他说明文字
 
 内容如下：
@@ -546,7 +545,7 @@ TTL: 下一篇文章标题
                     elif line.startswith("SRC:"):
                         item["source"] = line[4:].strip()
                         current_field = None
-                    elif line.startswith("BOD:"):
+                    elif line.startswith("ABS:"):
                         current_field = "body"
                     elif current_field == "body":
                         item["body"] += line + "\n"
