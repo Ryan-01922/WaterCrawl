@@ -82,28 +82,16 @@ async def get_results(task_id: str = Query(..., description="任务 ID")):
             "summary": None,
         }
     results = await task_manager.get_results(task_id)
+    links = await task_manager.get_links(task_id)
     summary = await task_manager.get_summary(task_id)
     return {
         "task_id": task_id,
         "status": task.get("status"),
         "progress": task.get("progress"),
-        "results": results,
-        "summary": summary,
-    }
-
-
-@app.get("/api/links")
-async def get_links(task_id: str = Query(..., description="任务 ID")):
-    """获取指定任务的文章标题与链接（不含正文）"""
-    task = await task_manager.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    links = await task_manager.get_links(task_id)
-    return {
-        "task_id": task_id,
-        "status": task.get("status"),
         "links": links,
         "total": len(links),
+        "results": results,
+        "summary": summary,
     }
 
 

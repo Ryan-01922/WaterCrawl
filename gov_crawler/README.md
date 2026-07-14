@@ -136,7 +136,7 @@ POST /api/crawl {"url": "..."}
         │
 ┌─ Step 5: Layer 2 — 批量爬取文章 ───────────────────┐
 │  5a. 截断: article_urls[:30]                        │
-│      → 全量链接存入 self._links（/api/links 可查）   │
+│      → 全量链接存入 Redis（/api/results 中可查）     │
 │      → 仅前 30 篇进入正文爬取                        │
 │                                                      │
 │  5b. WaterCrawl POST /crawl-requests/batch/          │
@@ -157,16 +157,13 @@ POST /api/crawl {"url": "..."}
 │  6b. 用 ===== 分隔拼接所有文章                        │
 │  6c. 一次性发送给 Qwen3-32B（批量调用，节省 API 次数）│
 │                                                      │
-│  Prompt: "从以下政府网站文章中提取结构化信息：         │
-│           标题、发文日期、来源单位、正文（去掉导航/页脚）│
-│           返回 JSON 数组"                             │
+│  Prompt: "为每篇文章生成 200 字以内的摘要，概括核心内容"   │
 │                                                      │
-│  JSON 解析三重容错:                                   │
-│  1. re 提取数组范围 → json.loads()                    │
-│  2. 直接 json.loads()                                │
-│  3. 逐条正则匹配 {..} → 逐条 json.loads()             │
+│  返回分隔符格式 (TTL/DTM/SRC/ABS)                     │
+│  解析：split("===") → 前缀匹配                        │
 │                                                      │
 │  cleaned = [{title, publish_date, source, body}, ...] │
+│  (body 字段存储摘要内容)                              │
 └─────────────────────────────────────────────────────┘
         │
         ▼
@@ -296,6 +293,11 @@ GET /api/results?task_id=a1b2c3d4
   "task_id": "a1b2c3d4",
   "status": "finished",
   "progress": "全部完成: 10 篇文章 + AI 摘要",
+  "links": [
+    {"title": "关于xxx的通知", "url": "https://..."},
+    {"title": "关于yyy的公告", "url": "https://..."}
+  ],
+  "total": 15,
   "results": [
     {
       "title": "关于xxx的通知",
@@ -305,7 +307,7 @@ GET /api/results?task_id=a1b2c3d4
         "title": "关于xxx的通知",
         "publish_date": "2026-07-10",
         "source": "财政部",
-        "body": "为促进...（纯正文）"
+        "body": "本文摘要内容..."
       }
     }
   ],
@@ -313,25 +315,7 @@ GET /api/results?task_id=a1b2c3d4
 }
 ```
 
-### 获取链接列表
-
-```
-GET /api/links?task_id=a1b2c3d4
-```
-
-```json
-{
-  "task_id": "a1b2c3d4",
-  "status": "finished",
-  "links": [
-    {"title": "关于xxx的通知", "url": "https://..."},
-    {"title": "关于yyy的公告", "url": "https://..."}
-  ],
-  "total": 15
-}
-```
-
-> 返回**全部**识别到的文章链接（无 30 篇上限），不含正文。适合快速预览和选择性下载。
+> `links` 返回**全部**识别到的文章链接（无 30 篇上限）；`results` 包含实际爬取了正文的**前 30 篇**。
 
 ---
 
@@ -344,7 +328,11 @@ GET /api/links?task_id=a1b2c3d4
 | `GPUSTACK_API_KEY` | **是** | — | GPUStack API 密钥 |
 | `GPUSTACK_API_BASE` | 否 | `https://gpustack.stock.hnchasing.com/v1` | GPUStack API 地址 |
 | `GPUSTACK_MODEL` | 否 | `qwen3-32b` | 使用的模型名称 |
-| `REDIS_URL` | 否 | `redis://gov-redis:6379/0` | Redis 连接地址 |
+| `REDIS_HOST` | 否 | `host.docker.internal` | Redis 宿主机地址 |
+| `REDIS_PORT` | 否 | `16379` | Redis 端口 |
+| `REDIS_DB` | 否 | `0` | Redis 数据库编号 |
+| `REDIS_PASSWORD` | 否 | — | Redis 密码 |
+| `REDIS_URL` | 否 | (由上述变量自动拼接) | 或直接指定完整 URL |
 | `WORKER_COUNT` | 否 | `3` | 并发 Worker 数量 |
 
 ---
@@ -366,7 +354,7 @@ cd gov_crawler
 cp .env.example .env
 nano .env  # 填入 WATERCRAWL_API_KEY 和 GPUSTACK_API_KEY
 
-# 2. 启动（含 Redis）
+# 2. 启动（连接宿主机 Redis）
 sudo docker compose up -d --build
 
 # 3. 验证
@@ -405,11 +393,8 @@ while true; do
   sleep 2
 done
 
-# 3. 获取结果
+# 3. 获取结果（含 links + results + summary）
 curl -s "http://10.60.151.130:7107/api/results?task_id=$TASK_ID" | python3 -m json.tool | head -50
-
-# 4. 获取链接
-curl -s "http://10.60.151.130:7107/api/links?task_id=$TASK_ID" | python3 -m json.tool
 ```
 
 ### Python

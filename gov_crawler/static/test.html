@@ -230,16 +230,31 @@ async function loadResults() {
   try {
     const resp = await fetch('/api/results?task_id=' + currentTaskId);
     const data = await resp.json();
-    renderAll(data.summary, data.results);
+    renderAll(data.summary, data.results, data.links, data.total);
   } catch(e) {
     document.getElementById('resultsArea').innerHTML = '<p style="color:red;">加载结果失败: ' + e.message + '</p>';
   }
 }
 
-function renderAll(summary, results) {
+function renderAll(summary, results, links, total) {
   const area = document.getElementById('resultsArea');
   const countEl = document.getElementById('resultCount');
   let html = '';
+
+  // 链接统计
+  if (total > 0) {
+    html += '<div style="background:#e8f0fe;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#1a73e8;">';
+    html += '共识别 <b>' + total + '</b> 篇文章（正文爬取上限 30 篇）';
+    if (links && links.length > 0) {
+      html += ' <details style="display:inline;margin-left:8px;"><summary style="cursor:pointer;color:#4361ee;">查看全部链接</summary>';
+      html += '<ul style="margin-top:8px;padding-left:18px;max-height:200px;overflow-y:auto;">';
+      for (const l of links) {
+        html += '<li style="margin:4px 0;"><a href="' + escapeHtml(l.url) + '" target="_blank" style="color:#333;text-decoration:none;">' + escapeHtml(l.title) + '</a></li>';
+      }
+      html += '</ul></details>';
+    }
+    html += '</div>';
+  }
 
   // 摘要卡片
   if (summary) {
@@ -251,7 +266,7 @@ function renderAll(summary, results) {
     html += '<p style="color:#888;">暂无结果</p>';
     countEl.textContent = '0';
   } else {
-    countEl.textContent = results.length;
+    countEl.textContent = results.length + (total > results.length ? '/' + total : '');
     html += '<ul class="article-list">';
     for (const a of results) {
       html += '<li class="article-item">';
