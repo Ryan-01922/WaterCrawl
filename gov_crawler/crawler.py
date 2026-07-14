@@ -722,18 +722,20 @@ async def execute_crawl(task_id: str, url: str):
             if not articles_info:
                 raise RuntimeError("未能识别到任何文章链接")
 
+            # 统一截断至 30 篇（links + results 一致）
+            if len(articles_info) > 30:
+                logger.info("文章数 %d 超过上限 30, 截取前30篇", len(articles_info))
+                articles_info = articles_info[:30]
+
             all_links = [{"title": a["title"], "url": a["url"]} for a in articles_info]
-            logger.info("识别到 %d 篇文章", len(all_links))
+            logger.info("最终 %d 篇文章", len(all_links))
 
             # ---- Layer 2 ----
             article_urls = [a["url"] for a in articles_info]
-            if len(article_urls) > 30:
-                logger.info("文章数 %d 超过上限 30, 截取前30篇", len(article_urls))
-                article_urls = article_urls[:30]
 
             await task_manager.update_task(
                 task_id,
-                progress=f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章（共识别到 {len(all_links)} 篇）...",
+                progress=f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章...",
             )
             batch_results = await batch_scrape_articles(client, article_urls)
 
