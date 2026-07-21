@@ -471,21 +471,37 @@ def _extract_raw_text(article_data: dict) -> str:
 
 
 async def ai_clean_all_contents(articles_data: list[dict]) -> list[dict]:
-    """使用 Qwen3 批量清洗所有文章内容，提取结构化信息"""
+    """使用 Qwen3 分批清洗所有文章内容，提取结构化信息
+
+    分批（每批 10 篇）以避免超出 max_tokens 输出限制，
+    兼容任意篇数（0~30+）。
+    """
     if not articles_data:
         return []
 
-    texts = []
-    for i, ad in enumerate(articles_data):
-        raw = _extract_raw_text(ad)
-        if not raw or len(raw) < 50:
-            texts.append(f"[{i}] (内容不足)")
-        else:
-            texts.append(f"[{i}]\n{raw[:5000]}")
+    BATCH_SIZE = 10
+    all_cleaned = []
 
-    batch_text = "\n\n=====\n\n".join(texts)
+    for start in range(0, len(articles_data), BATCH_SIZE):
+        batch = articles_data[start:start + BATCH_SIZE]
+        logger.info(
+            "[清洗] 批次 %d: 第 %d-%d 篇",
+            start // BATCH_SIZE + 1,
+            start + 1,
+            start + len(batch),
+        )
 
-    prompt = f"""以下是从政府网站抓取到的 {len(articles_data)} 篇文章的网页全文，每篇以 "=====" 分隔。
+        texts = []
+        for i, ad in enumerate(batch):
+            raw = _extract_raw_text(ad)
+            if not raw or len(raw) < 50:
+                texts.append(f"[{start + i}] (内容不足)")
+            else:
+                texts.append(f"[{start + i}]\n{raw[:5000]}")
+
+        batch_text = "\n\n=====\n\n".join(texts)
+
+        prompt = f"""以下是从政府网站抓取到的 {len(batch)} 篇文章的网页全文，每篇以 "=====" 分隔。
 
 请对每篇文章：先生成一段 200 字以内的摘要，概括文章核心内容。
 
@@ -508,56 +524,59 @@ TTL: 下一篇文章标题
 内容如下：
 {batch_text}"""
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(
-                f"{GPUSTACK_API_BASE}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GPUSTACK_API_KEY}".encode("utf-8"),
-                    "Content-Type": b"application/json",
-                },
-                json={
-                    "model": GPUSTACK_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 8192,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            raw_response = data["choices"][0]["message"]["content"].strip()
-            logger.info("[清洗] AI 响应 (前200字符): %s", raw_response[:200].replace("\n", "\\n"))
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            try:
+                resp = await client.post(
+                    f"{GPUSTACK_API_BASE}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GPUSTACK_API_KEY}".encode("utf-8"),
+                        "Content-Type": b"application/json",
+                    },
+                    json={
+                        "model": GPUSTACK_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.1,
+                        "max_tokens": 5120,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                raw_response = data["choices"][0]["message"]["content"].strip()
+                logger.info(
+                    "[清洗] 批次 %d AI 响应 (前200字符): %s",
+                    start // BATCH_SIZE + 1,
+                    raw_response[:200].replace("\n", "\\n"),
+                )
 
-            # 按 === 分割每篇文章
-            blocks = [b.strip() for b in raw_response.split("===") if b.strip()]
-            cleaned_list = []
-            for block in blocks:
-                lines = block.strip().split("\n")
-                item = {"title": "", "publish_date": "", "source": "", "body": ""}
-                current_field = None
-                for line in lines:
-                    if line.startswith("TTL:"):
-                        item["title"] = line[4:].strip()
-                        current_field = None
-                    elif line.startswith("DTM:"):
-                        item["publish_date"] = line[4:].strip()
-                        current_field = None
-                    elif line.startswith("SRC:"):
-                        item["source"] = line[4:].strip()
-                        current_field = None
-                    elif line.startswith("ABS:"):
-                        current_field = "body"
-                    elif current_field == "body":
-                        item["body"] += line + "\n"
-                item["body"] = item["body"].strip()
-                if item["title"]:
-                    cleaned_list.append(item)
+                # 按 === 分割每篇文章
+                blocks = [b.strip() for b in raw_response.split("===") if b.strip()]
+                for block in blocks:
+                    lines = block.strip().split("\n")
+                    item = {"title": "", "publish_date": "", "source": "", "body": ""}
+                    current_field = None
+                    for line in lines:
+                        if line.startswith("TTL:"):
+                            item["title"] = line[4:].strip()
+                            current_field = None
+                        elif line.startswith("DTM:"):
+                            item["publish_date"] = line[4:].strip()
+                            current_field = None
+                        elif line.startswith("SRC:"):
+                            item["source"] = line[4:].strip()
+                            current_field = None
+                        elif line.startswith("ABS:"):
+                            current_field = "body"
+                        elif current_field == "body":
+                            item["body"] += line + "\n"
+                    item["body"] = item["body"].strip()
+                    if item["title"]:
+                        all_cleaned.append(item)
 
-            logger.info("[清洗] AI 批量清洗完成: %d 篇", len(cleaned_list))
-            return cleaned_list
-        except Exception as e:
-            logger.warning("[清洗] AI 批量清洗失败: %s", e)
-            return []
+            except Exception as e:
+                logger.warning("[清洗] 批次 %d 清洗失败: %s", start // BATCH_SIZE + 1, e)
+
+    logger.info("[清洗] AI 分批清洗完成: %d 篇", len(all_cleaned))
+    return all_cleaned
 
 
 # ==================== AI 摘要生成 ====================
