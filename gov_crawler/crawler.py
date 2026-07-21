@@ -758,16 +758,36 @@ async def execute_crawl(task_id: str, url: str):
             )
             batch_results = await batch_scrape_articles(client, article_urls)
 
+            # 按 URL 构建结果索引，避免因部分 URL 爬取失败导致索引错位
+            result_by_url = {r["url"]: r for r in batch_results}
+            missing_urls = [
+                u for u in article_urls if u not in result_by_url
+            ]
+            if missing_urls:
+                logger.warning(
+                    "WaterCrawl 批量爬取丢失 %d/%d 篇，缺失 URL: %s",
+                    len(missing_urls), len(article_urls),
+                    [u[:80] for u in missing_urls],
+                )
+
             # ---- AI 清洗 ----
             await task_manager.update_task(task_id, progress="正在 AI 清洗文章内容...")
-            cleaned = await ai_clean_all_contents(batch_results)
+            # 只清洗成功爬取到的文章
+            matched_results = [result_by_url[u] for u in article_urls if u in result_by_url]
+            cleaned = await ai_clean_all_contents(matched_results)
+            # 用爬取结果的 url 匹配 cleaned（按索引同序）
+            cleaned_by_url = {}
+            for i, c in enumerate(cleaned):
+                if i < len(matched_results):
+                    cleaned_by_url[matched_results[i]["url"]] = c
 
-            for i, info in enumerate(articles_info):
-                item = {"title": info["title"], "url": info["url"], "content": None}
-                if i < len(batch_results):
-                    item["content"] = batch_results[i]
-                if i < len(cleaned):
-                    item["cleaned"] = cleaned[i]
+            for info in articles_info:
+                url = info["url"]
+                item = {"title": info["title"], "url": url, "content": None}
+                if url in result_by_url:
+                    item["content"] = result_by_url[url]
+                if url in cleaned_by_url:
+                    item["cleaned"] = cleaned_by_url[url]
                 merged.append(item)
 
             # ---- AI 摘要 ----
