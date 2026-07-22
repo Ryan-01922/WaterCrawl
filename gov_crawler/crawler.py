@@ -13,7 +13,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
 import httpx
 import redis.asyncio as aioredis
@@ -413,6 +414,34 @@ async def extract_article_links(html: str, base_url: str) -> list[dict]:
     return ai_result
 
 
+# ==================== robots.txt 检查 ====================
+
+ROBOTS_CACHE: dict[str, RobotFileParser | None] = {}  # domain → parser 或 None（无 robots.txt）
+
+
+async def _check_robots_txt(client: httpx.AsyncClient, url: str) -> bool:
+    """检查 URL 是否被 robots.txt 允许爬取，返回 True=允许, False=禁止"""
+    parsed = urlparse(url)
+    domain = f"{parsed.scheme}://{parsed.netloc}"
+
+    if domain not in ROBOTS_CACHE:
+        rp = RobotFileParser()
+        rp.allow_all = False       # 默认禁止（谨慎策略）
+        try:
+            resp = await client.get(f"{domain}/robots.txt", timeout=10.0)
+            if resp.status_code == 200:
+                rp.parse(resp.text.splitlines())
+            else:
+                # 没有 robots.txt，允许所有
+                rp.allow_all = True
+        except Exception:
+            rp.allow_all = True     # 网络异常，放行
+        ROBOTS_CACHE[domain] = rp
+
+    rp = ROBOTS_CACHE[domain]
+    return rp.can_fetch("*", url)
+
+
 # ==================== 批量爬取 ====================
 
 async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> list[dict]:
@@ -752,28 +781,45 @@ async def execute_crawl(task_id: str, url: str):
             # ---- Layer 2 ----
             article_urls = [a["url"] for a in articles_info]
 
+            # robots.txt 预检
             await task_manager.update_task(
                 task_id,
-                progress=f"Layer 2: 正在批量爬取 {len(article_urls)} 篇文章...",
+                progress=f"Layer 2: 正在检查 robots.txt ({len(article_urls)} 篇)...",
             )
-            batch_results = await batch_scrape_articles(client, article_urls)
+            allowed_urls = []
+            robots_blocked = set()
+            for url in article_urls:
+                if await _check_robots_txt(client, url):
+                    allowed_urls.append(url)
+                else:
+                    robots_blocked.add(url)
+                    logger.warning("robots.txt 拦截: %s", url[:80])
 
-            # 按 URL 构建结果索引，避免因部分 URL 爬取失败导致索引错位
+            # 批量爬取（仅允许的 URL）
+            batch_results = []
+            if allowed_urls:
+                await task_manager.update_task(
+                    task_id,
+                    progress=f"Layer 2: 正在批量爬取 {len(allowed_urls)} 篇文章...",
+                )
+                batch_results = await batch_scrape_articles(client, allowed_urls)
+
+            # 按 URL 构建结果索引
             result_by_url = {r["url"]: r for r in batch_results}
             missing_urls = [
-                u for u in article_urls if u not in result_by_url
+                u for u in allowed_urls if u not in result_by_url
             ]
             if missing_urls:
                 logger.warning(
                     "WaterCrawl 批量爬取丢失 %d/%d 篇，缺失 URL: %s",
-                    len(missing_urls), len(article_urls),
+                    len(missing_urls), len(allowed_urls),
                     [u[:80] for u in missing_urls],
                 )
 
             # ---- AI 清洗 ----
             await task_manager.update_task(task_id, progress="正在 AI 清洗文章内容...")
             # 只清洗成功爬取到的文章
-            matched_results = [result_by_url[u] for u in article_urls if u in result_by_url]
+            matched_results = [result_by_url[u] for u in allowed_urls if u in result_by_url]
             cleaned = await ai_clean_all_contents(matched_results)
             # 用爬取结果的 url 匹配 cleaned（按索引同序）
             cleaned_by_url = {}
@@ -788,6 +834,8 @@ async def execute_crawl(task_id: str, url: str):
                     item["content"] = result_by_url[url]
                 if url in cleaned_by_url:
                     item["cleaned"] = cleaned_by_url[url]
+                elif url in robots_blocked:
+                    item["cleaned"] = {"title": info["title"], "publish_date": "", "source": "", "body": "页面反爬，robots.txt 禁止访问"}
                 else:
                     item["cleaned"] = {"title": info["title"], "publish_date": "", "source": "", "body": "链接内容爬取失败"}
                 merged.append(item)
