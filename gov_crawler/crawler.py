@@ -788,6 +788,8 @@ async def execute_crawl(task_id: str, url: str):
                     item["content"] = result_by_url[url]
                 if url in cleaned_by_url:
                     item["cleaned"] = cleaned_by_url[url]
+                else:
+                    item["cleaned"] = {"title": info["title"], "publish_date": "", "source": "", "body": "链接内容爬取失败"}
                 merged.append(item)
 
             # ---- AI 摘要 ----
