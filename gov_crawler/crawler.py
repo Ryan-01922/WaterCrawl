@@ -543,8 +543,9 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
         "page_options": {
             "include_html": False,
             "only_main_content": True,
-            "wait_time": 1000,
-            "timeout": 30000,
+            "wait_time": 5000,
+            "timeout": 60000,
+            "ignore_rendering": False,
         },
     }
     resp = await client.post(
