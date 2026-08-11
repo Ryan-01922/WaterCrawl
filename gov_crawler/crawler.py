@@ -18,7 +18,7 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 import redis.asyncio as aioredis
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 logger = logging.getLogger("gov_crawler")
 logger.setLevel(logging.INFO)
@@ -245,34 +245,116 @@ def _extract_links_from_html(html: str, base_url: str) -> list[dict]:
     return links
 
 
+def _build_dom_tree_text(html: str, base_url: str, max_nodes: int = 600) -> tuple[str, dict]:
+    """[阶段2前置] 把列表页 DOM 转成带层级缩进的结构化树文本，让 AI 能"看到"页面布局。
+
+    返回 (树文本, {行号: {text, url}})，树文本中每个链接行以 [L行号] 标记，
+    便于 AI 在回答中引用具体行号，避免标题歧义。
+    """
+    soup = BeautifulSoup(html, "lxml")
+    # 删除无关节点，降低噪声
+    for tag in soup(["script", "style", "noscript", "svg", "link", "meta", "header", "footer"]):
+        tag.decompose()
+
+    lines = []
+    link_map = {}  # 行号 -> {"text", "url"}
+    seen_urls = set()
+    node_count = [0]
+
+    def walk(node, depth: int):
+        if node_count[0] >= max_nodes:
+            return
+        node_count[0] += 1
+        indent = "  " * depth
+
+        if isinstance(node, Comment):
+            return
+        if isinstance(node, NavigableString):
+            text = str(node).strip()
+            if text:
+                lines.append(f"{indent}text: {text[:80]}")
+            return
+        if not isinstance(node, Tag):
+            return
+
+        tag_name = node.name
+
+        # 链接节点：优先展示文本，标注行号
+        if tag_name == "a" and node.get("href"):
+            href = node.get("href", "").strip()
+            text = node.get_text(" ", strip=True)
+            if not text or href.startswith(("#", "javascript:", "mailto:")):
+                return
+            full_url = urljoin(base_url, href)
+            if full_url in seen_urls:
+                return
+            seen_urls.add(full_url)
+            line_no = len(lines) + 1
+            link_map[line_no] = {"text": text, "url": full_url}
+            lines.append(f"{indent}<a L{line_no}> {text[:80]}")
+            return
+
+        # 有意义的块级容器：展示标签 + 类名/id + 首段文本
+        cls = node.get("class")
+        id_ = node.get("id")
+        attrs = ""
+        if cls:
+            attrs += f' class="{" ".join(cls[:3])}"'
+        if id_:
+            attrs += f' id="{id_}"'
+
+        block_tags = {"ul", "ol", "li", "table", "tbody", "tr", "td", "div", "section", "article", "main", "nav", "aside"}
+        text = node.get_text(" ", strip=True)[:60]
+        if tag_name in block_tags:
+            lines.append(f"{indent}<{tag_name}{attrs}> {text}")
+        else:
+            # 内联标签不单独占行（避免噪声），但保留文本
+            if text and text not in ("", " "):
+                lines.append(f"{indent}<{tag_name}> {text[:60]}")
+
+        for child in node.children:
+            if node_count[0] >= max_nodes:
+                return
+            walk(child, depth + 1)
+
+    body = soup.body if soup.body else soup
+    walk(body, 0)
+    return "\n".join(lines), link_map
+
+
 async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
-    """[阶段2] 使用 Qwen3-32B 从全量候选链接中智能筛选文章链接"""
-    all_links = _extract_links_from_html(html, base_url)
-    if not all_links:
-        logger.warning("[阶段2] HTML 中未提取到任何链接")
+    """[阶段2] 使用 Qwen3-32B 基于 DOM 结构树筛选文章链接。
+
+    将列表页 DOM 转为带层级缩进的树文本，让模型看到页面布局
+    （列表区/导航区/分页区），而不是孤立的链接清单。
+    """
+    tree_text, link_map = _build_dom_tree_text(html, base_url)
+    if not link_map:
+        logger.warning("[阶段2] DOM 树中未提取到任何链接")
         return []
 
-    # 截取前 400 个链接避免 prompt 过长
-    ai_input = all_links[:400]
-    links_text = json.dumps(ai_input, ensure_ascii=False, indent=2)
+    # 树文本过长时截断，优先保留前面的内容区
+    if len(tree_text) > 30000:
+        tree_text = tree_text[:30000]
+        logger.warning("[阶段2] DOM 树文本超过 30000 字符，已截断")
 
-    prompt = f"""你是一个网页分析助手。以下是从一个政府网站的列表页提取到的所有链接。
-请从中筛选出真正的「文章/正文」链接，排除以下：
-- 导航栏（首页、上一页、下一页、尾页）
-- 分页链接（页码数字）
-- 面包屑路径
-- 栏目首页、频道页
-- 非正文页
+    prompt = f"""你是一个网页分析助手。以下是一个政府网站列表页的 DOM 结构树，
+每个 `<a>` 链接以 `L行号` 标记（如 `L12`）。请根据页面结构判断哪些链接是真正的「文章/正文」链接。
 
-要求：
-- 每条返回 title 和 url
-- 只返回 JSON 数组，不要任何其他文字
+判断依据：
+1. 位于列表容器（ul/li/table/td）内，且带日期或序号
+2. 链接文本是完整文章标题（通常 10 字以上，包含主题词）
+3. 排除：导航栏、栏目首页、频道页、分页、面包屑、"更多"、"首页"、"上一页/下一页"
+4. 排除：纯数字页码、无实义短语链接
+5. 一个标题通常对应一条独立文章
 
-链接列表：
-{links_text}
+DOM 结构树：
+{tree_text}
 
-严格返回格式：
-[{{"title": "标题", "url": "完整URL"}}, ...]"""
+请只返回这些文章链接对应的行号列表，JSON 数组格式，例如：
+[12, 35, 48]
+
+不要返回任何其他文字。"""
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
@@ -293,14 +375,21 @@ async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
-            articles = json.loads(content)
-            if isinstance(articles, list) and all(isinstance(a, dict) for a in articles):
-                logger.info("[阶段2] AI 识别到 %d 篇文章", len(articles))
-                if articles:
-                    logger.info("[阶段2] 第一篇: 《%s》 %s", articles[0].get("title", "?"), articles[0].get("url", "")[:80])
-                return articles
-            logger.warning("[阶段2] AI 返回格式异常: %s", type(articles))
-            return []
+            line_numbers = json.loads(content)
+            if not isinstance(line_numbers, list):
+                raise ValueError(f"AI 返回格式异常: {type(line_numbers)}")
+            # 用行号还原 title/url，行号不存在则跳过
+            articles = []
+            for ln in line_numbers:
+                item = link_map.get(int(ln))
+                if item:
+                    articles.append(item)
+                else:
+                    logger.warning("[阶段2] AI 返回了无效行号: %s", ln)
+            logger.info("[阶段2] AI 识别到 %d 篇文章", len(articles))
+            if articles:
+                logger.info("[阶段2] 第一篇: 《%s》 %s", articles[0].get("title", "?"), articles[0].get("url", "")[:80])
+            return articles
         except Exception as e:
             logger.warning("[阶段2] AI 识别失败: %s", e)
             return []

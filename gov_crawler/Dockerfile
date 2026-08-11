@@ -10,6 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 7107
+EXPOSE 7106
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7107"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7106"]

@@ -3,7 +3,7 @@ services:
     build: .
     container_name: gov-crawler
     ports:
-      - "7107:7107"
+      - "7106:7106"
     env_file: .env
     environment:
       - REDIS_HOST=host.docker.internal

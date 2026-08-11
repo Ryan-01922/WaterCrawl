@@ -96,4 +96,4 @@ async def get_results(task_id: str = Query(..., description="任务 ID")):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=7107, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=7106, reload=True)

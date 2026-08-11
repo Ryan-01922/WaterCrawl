@@ -13,6 +13,7 @@ from .spiders.scraper import SiteScrapper
 from .spiders.sitemap import SitemapScrapper
 
 
+
 class SpiderPipeline:
     # Note: do not use @sync_to_async as a method decorator here. asgiref's
     # SyncToAsync.__get__ returns a fresh functools.partial on every attribute
