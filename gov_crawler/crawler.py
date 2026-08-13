@@ -322,6 +322,28 @@ def _build_dom_tree_text(html: str, base_url: str, max_nodes: int = 600) -> tupl
     return "\n".join(lines), link_map
 
 
+def _parse_line_numbers(content: str) -> list[int]:
+    """从 AI 返回内容中健壮地解析行号数组，容忍多余文字或截断"""
+    # 1. 尝试直接 JSON 解析
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list):
+            return [int(x) for x in parsed if str(x).lstrip("-").isdigit()]
+    except Exception:
+        pass
+    # 2. 用正则提取方括号中的数字序列
+    m = re.search(r"\[\s*[\d,\s]+\s*\]", content)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+            return [int(x) for x in parsed]
+        except Exception:
+            pass
+    # 3. 直接提取所有数字（最后手段）
+    nums = re.findall(r"\b\d+\b", content)
+    return [int(x) for x in nums]
+
+
 async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
     """[阶段2] 使用 Qwen3-32B 基于 DOM 结构树筛选文章链接。
 
@@ -351,10 +373,13 @@ async def ai_extract_article_links(html: str, base_url: str) -> list[dict]:
 DOM 结构树：
 {tree_text}
 
-请只返回这些文章链接对应的行号列表，JSON 数组格式，例如：
+请只输出一个 JSON 数组，包含所有文章链接对应的行号，例如：
 [12, 35, 48]
 
-不要返回任何其他文字。"""
+严格要求：
+- 只输出 JSON 数组本身，禁止任何解释、前后缀文字、markdown 代码块
+- 如果拿不准某些链接，宁可少选，不要误选非文章链接
+- 如果没有文章链接，输出 []"""
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
@@ -368,16 +393,16 @@ DOM 结构树：
                     "model": GPUSTACK_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 4096,
+                    "max_tokens": 8192,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
-            line_numbers = json.loads(content)
-            if not isinstance(line_numbers, list):
-                raise ValueError(f"AI 返回格式异常: {type(line_numbers)}")
+            line_numbers = _parse_line_numbers(content)
+            if not line_numbers:
+                raise ValueError("AI 返回内容中未解析到行号数组")
             # 用行号还原 title/url，行号不存在则跳过
             articles = []
             for ln in line_numbers:
