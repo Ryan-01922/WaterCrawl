@@ -408,7 +408,8 @@ DOM 结构树：
             for ln in line_numbers:
                 item = link_map.get(int(ln))
                 if item:
-                    articles.append(item)
+                    # 统一结构为 {"title", "url"}，与降级方案保持一致
+                    articles.append({"title": item.get("text", ""), "url": item.get("url", "")})
                 else:
                     logger.warning("[阶段2] AI 返回了无效行号: %s", ln)
             logger.info("[阶段2] AI 识别到 %d 篇文章", len(articles))
