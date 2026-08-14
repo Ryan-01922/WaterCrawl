@@ -567,8 +567,11 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
     options = {
         "spider_options": {"max_depth": 0, "page_limit": len(urls)},
         "page_options": {
-            "include_html": False,
-            "only_main_content": True,
+            # 与列表页一致：不过滤主内容，保留原始 HTML。
+            # 新华网等站点正文结构不在常见 article/content 标签内，
+            # only_main_content=True 会被误判为导航丢弃，导致正文缺失。
+            "include_html": True,
+            "only_main_content": False,
             "wait_time": 5000,
             "timeout": 60000,
             "ignore_rendering": False,
