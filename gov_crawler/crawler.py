@@ -612,17 +612,30 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
 # ==================== AI 内容清洗 ====================
 
 def _extract_raw_text(article_data: dict) -> str:
-    """从爬取结果中提取可读文本（优先 markdown，退回到 html）"""
+    """从爬取结果中提取可读文本。
+
+    优先从 HTML 中提取正文 <p> 段落（跳过 script/style/导航/页脚），
+    避免 markdown 开头大量导航内容挤占清洗输入截断窗口；
+    兜底退回 markdown。
+    """
     result = article_data.get("result", {})
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
+        html = result.get("html", "")
+        if html:
+            soup = BeautifulSoup(html, "lxml")
+            for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+                tag.decompose()
+            ps = soup.find_all("p")
+            text = "\n".join(
+                p.get_text(" ", strip=True) for p in ps if p.get_text(strip=True)
+            )
+            if len(text) > 200:
+                return text
         md = result.get("markdown", "")
         if md:
             return md
-        html = result.get("html", "")
-        if html:
-            return BeautifulSoup(html, "lxml").get_text(" ", strip=True)
     return ""
 
 
