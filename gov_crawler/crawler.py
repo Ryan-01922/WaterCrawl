@@ -910,13 +910,7 @@ async def execute_crawl(task_id: str, url: str):
             if not articles_info:
                 raise RuntimeError("未能识别到任何文章链接")
 
-            # 统一截断至 30 篇（links + results 一致）
-            if len(articles_info) > 30:
-                logger.info("文章数 %d 超过上限 30, 截取前30篇", len(articles_info))
-                articles_info = articles_info[:30]
-
-            all_links = [{"title": a["title"], "url": a["url"]} for a in articles_info]
-            logger.info("最终 %d 篇文章", len(all_links))
+            logger.info("AI 识别到 %d 篇文章", len(articles_info))
 
             # ---- Layer 2 ----
             article_urls = [a["url"] for a in articles_info]
@@ -979,6 +973,22 @@ async def execute_crawl(task_id: str, url: str):
                 else:
                     item["cleaned"] = {"title": info["title"], "publish_date": "", "source": "", "body": "链接内容爬取失败"}
                 merged.append(item)
+
+            # ---- 按发布日期排序（最新在前），无日期的排最后 ----
+            def _date_key(m):
+                d = (m.get("cleaned") or {}).get("publish_date", "") or ""
+                return d if re.match(r"^\d{4}-\d{2}-\d{2}", d) else "0000-00-00"
+
+            merged.sort(key=_date_key, reverse=True)
+            logger.info("按发布日期排序完成，首篇日期=%s", _date_key(merged[0]) if merged else "无")
+
+            # 排序后统一截断至 30 篇（links + results 一致）
+            if len(merged) > 30:
+                logger.info("按日期排序后 %d 篇，截取最新 30 篇", len(merged))
+                merged = merged[:30]
+
+            all_links = [{"title": m["title"], "url": m["url"]} for m in merged]
+            logger.info("最终 %d 篇文章", len(all_links))
 
             # ---- AI 摘要 ----
             if merged:
