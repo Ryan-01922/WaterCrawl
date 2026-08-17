@@ -593,10 +593,18 @@ async def batch_scrape_articles(client: httpx.AsyncClient, urls: list[str]) -> l
     enriched = []
     for r in results:
         content = await _get_result_content(client, r)
+        inner = content.get("result", content)
+        # 诊断日志：查看批量爬取返回的 markdown 是否包含正文
+        if isinstance(inner, dict):
+            md_len = len(inner.get("markdown", "") or "")
+            html_len = len(inner.get("html", "") or "")
+            logger.info("[批量] url=%s markdown_len=%d html_len=%d md_head=%s",
+                        r.get("url", "")[-60:], md_len, html_len,
+                        (inner.get("markdown", "") or "")[:120].replace("\n", " "))
         enriched.append({
             "uuid": r.get("uuid"),
             "url": r.get("url"),
-            "result": content.get("result", content),
+            "result": inner,
         })
     return enriched
 
