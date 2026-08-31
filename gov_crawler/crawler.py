@@ -159,26 +159,13 @@ async def _wait_crawl(client: httpx.AsyncClient, uuid: str, poll_interval: float
     raise TimeoutError(f"爬取超时: {uuid}")
 
 
-async def _get_results(client: httpx.AsyncClient, uuid: str, retries: int = 3, delay: float = 2.0) -> list[dict]:
-    """获取爬取结果列表。
-
-    任务状态 finished 后结果可能异步落盘，空结果时重试数次（处理竞态）；
-    重试仍为空则返回空列表，由调用方区分「任务失败」与「无结果」。
-    """
-    results = []
-    for attempt in range(retries):
-        resp = await client.get(
-            f"{WATERCRAWL_BASE_URL}/crawl-requests/{uuid}/results/",
-            headers=_wc_headers(),
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        if results:
-            return results
-        logger.warning("[结果] uuid=%s 结果为空 (第 %d/%d 次重试)", uuid, attempt + 1, retries)
-        if attempt < retries - 1:
-            await asyncio.sleep(delay)
-    return results
+async def _get_results(client: httpx.AsyncClient, uuid: str) -> list[dict]:
+    resp = await client.get(
+        f"{WATERCRAWL_BASE_URL}/crawl-requests/{uuid}/results/",
+        headers=_wc_headers(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("results", [])
 
 
 async def _get_result_content(client: httpx.AsyncClient, result: dict) -> dict:
@@ -204,15 +191,12 @@ async def _scrape_page(client: httpx.AsyncClient, url: str, page_options: dict =
     uuid = await _create_crawl(client, url, page_options)
     data = await _wait_crawl(client, uuid)
     if data.get("status") != "finished":
-        return {"status": data.get("status"), "html": "", "results": [], "error": data.get("error", "")}
+        return {"status": data.get("status"), "html": "", "results": []}
     results = await _get_results(client, uuid)
-    if not results:
-        # finished 但无结果：大概率被反爬/robots.txt 丢弃或纯 JS 页面未渲染，输出任务详情便于诊断
-        detail = {k: data.get(k) for k in ("error", "detail", "message") if data.get(k)}
-        logger.error(
-            "爬取任务 finished 但无任何结果: uuid=%s, url=%s, 任务详情=%s",
-            uuid, url[:120], detail,
-        )
+    if results:
+        logger.info("爬取结果原始数据 keys=%s", list(results[0].keys()))
+        result_val = results[0].get("result")
+        logger.info("爬取结果 result 字段类型=%s, 值前200字符=%s", type(result_val).__name__, str(result_val)[:200])
     html = ""
     enriched = []
     for r in results:
@@ -907,13 +891,8 @@ async def execute_crawl(task_id: str, url: str):
             await task_manager.update_task(task_id, progress="Layer 1: 正在爬取列表页...")
             logger.info("=== Layer 1: 爬取列表页 === task=%s", task_id)
             page = await _scrape_page(client, url)
-            if page["status"] != "finished":
-                raise RuntimeError(f"列表页爬取失败: 状态={page['status']}, 详情={page.get('error', '无')}")
-            if not page["html"]:
-                raise RuntimeError(
-                    "此网站反爬，无法获取列表页内容"
-                    "（WaterCrawl 任务完成但返回空内容，可能被反爬或纯 JS 页面未渲染）"
-                )
+            if page["status"] != "finished" or not page["html"]:
+                raise RuntimeError(f"列表页爬取失败: {page['status']}")
             logger.info("列表页爬取成功: html_len=%d", len(page["html"]))
 
             # ---- iframe ----
