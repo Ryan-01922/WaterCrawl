@@ -1,6 +1,6 @@
 # Gov Crawler — 通用政府网站文章爬取服务
 
-基于 WaterCrawl API + Qwen3-32B AI + Redis 任务队列，实现**任意政府网站列表页**的两层自动化爬取。
+基于 WaterCrawl API + Qwen3-32B AI + Redis 任务队列，实现**任意政府网站列表页**的两层自动化爬取：列表页 → AI 识别文章链接 → 批量爬取正文 → AI 生成每篇摘要与全局摘要 → 按日期排序输出最新 30 篇。
 
 ---
 
@@ -13,6 +13,7 @@
 - [部署](#部署)
 - [调用示例](#调用示例)
 - [项目结构](#项目结构)
+- [注意事项](#注意事项)
 
 ---
 
@@ -43,13 +44,13 @@
 
 | 能力 | 说明 |
 |------|------|
-| **通用性** | 不依赖固定网站结构，AI 自动识别文章链接 |
-| **多级降级** | AI → URL 白名单 → `li a` 选择器 → 全页面启发式 |
+| **通用性** | 不依赖固定网站结构，AI 基于 DOM 结构树自动识别文章链接 |
+| **多级降级** | AI → URL 白名单正则 → `li a` 选择器 → 全页面启发式 |
 | **任务队列** | Redis + 3 Worker，支持并发提交，互不阻塞 |
-| **iframe 适配** | 自动检测并追加爬取 iframe 内容 |
-| **内容清洗** | AI 提取 title/date/source/body，去除导航和页脚 |
-| **智能摘要** | AI 基于文章标题生成 200 字摘要 |
-| **30 篇上限** | 链接列表无限制，实际爬取正文限制前 30 篇 |
+| **iframe 适配** | 自动检测并追加爬取 iframe/frame 内容 |
+| **内容清洗** | AI 分批提取 title/date/source/body，去除导航和页脚 |
+| **智能摘要** | AI 基于文章标题生成约 200 字全局摘要 |
+| **30 篇上限** | 清洗完成后按发布日期降序排序，截取最新 30 篇输出 |
 
 ---
 
@@ -84,7 +85,7 @@ POST /api/crawl {"url": "..."}
 │      }}                                             │
 │                                                      │
 │  2b. 轮询 GET /crawl-requests/{uuid}/                │
-│      直到 status=finished（最长 300s）               │
+│      直到 status=finished（最长 120s）               │
 │                                                      │
 │  2c. GET /crawl-requests/{uuid}/results/             │
 │      → result 字段是 MinIO 预签名 URL                │
@@ -94,37 +95,28 @@ POST /api/crawl {"url": "..."}
         ▼
 ┌─ Step 3: iframe 检测 ───────────────────────────────┐
 │  3a. BeautifulSoup 解析 HTML                         │
-│  3b. find_all("iframe", src=True)                    │
+│  3b. find_all("iframe"/"frame", src=True)            │
 │      ├── 找到 iframe → urljoin 拼出完整 URL           │
+│      │   → 逐个爬取并将 HTML 合并到主 HTML           │
 │      └── 没找到 → 跳过，继续下一步                    │
-│                                                      │
-│  3c. 对每个 iframe 再次调用 WaterCrawl 爬取          │
-│      → 将 iframe 的 HTML 合并到主 HTML                │
-│      → html_len 从 2K 增长到 30K+                    │
 └─────────────────────────────────────────────────────┘
         │
         ▼
-┌─ Step 4: AI 识别文章链接（三层降级） ────────────────┐
+┌─ Step 4: AI 识别文章链接（多层降级） ────────────────┐
+│  4a. 把 DOM 转成带行号标记的缩进树文本               │
+│      每个链接行形如: <a L12> 标题                    │
+│  4b. 将树文本发给 Qwen3-32B                          │
+│      Prompt: "根据页面结构判断哪些链接是文章链接"     │
+│      → AI 只返回行号数组 [12, 35, 48]                │
+│  4c. 按行号还原 title/url                            │
 │                                                      │
-│  阶段1: 提取候选链接                                  │
-│  ├── BeautifulSoup 提取所有 <a href>                  │
-│  ├── 过滤: javascript: / # / mailto: / pdf / docx    │
-│  ├── 过滤: 链接文本为空                               │
-│  └── 保留: 所有 http URL → 200~500 个候选             │
-│                                                      │
-│  阶段2: Qwen3-32B AI 识别                            │
-│  ├── 全量候选链接发给 AI                              │
-│  ├── Prompt: "从以下链接列表中筛选出正文文章链接"       │
-│  ├── 返回: [{title, url}, ...]                       │
-│  └── 结果 >= 3 → 直接使用 ✓                          │
-│                                                      │
-│  阶段3: 降级策略（AI 失败时）                         │
-│  3a. URL 白名单正则匹配                               │
+│  AI 失败/结果 < 3 篇时启用降级：                      │
+│  3a. URL 白名单正则匹配                              │
 │      /art/ | /t{日期}_{编号}.htm | /c_{编号}.htm      │
-│      | /content/ | /info/ | /xxgk/.*/\d+ 等 10 种     │
+│      | /content/ | /info/ | /xxgk/ 等 10 种           │
 │  3b. <li> <a href> 通用选择器                        │
 │  3c. 全页面链接 + 启发式过滤                          │
-│      （排除 /col/col\d, 短文本, 导航关键词）          │
+│      （排除分页/导航/纯数字/栏目首页）                │
 │                                                      │
 │  合并策略:                                           │
 │  • AI 返回 >= 3 篇 → 仅用 AI 结果                    │
@@ -134,55 +126,62 @@ POST /api/crawl {"url": "..."}
         │
         ▼  articles_info = [{title, url}, ...]
         │
-┌─ Step 5: Layer 2 — 批量爬取文章 ───────────────────┐
-│  5a. 截断: article_urls[:30]                        │
-│      → 全量链接存入 Redis（/api/results 中可查）     │
-│      → 仅前 30 篇进入正文爬取                        │
-│                                                      │
-│  5b. WaterCrawl POST /crawl-requests/batch/          │
-│      Body: {"urls": [...], "options": {               │
-│        "include_html": true,                         │
-│        "only_main_content": true,  ← 只抓正文       │
-│        "wait_time": 1000                             │
-│      }}                                             │
-│                                                      │
-│  5c. 轮询等待 batch 任务完成（最长 600s）             │
-│  5d. 下载每篇文章的 MinIO 结果文件                    │
-│      → batch_results = ["文章1 HTML", "文章2 HTML", ...]│
+┌─ Step 5: robots.txt 预检 ───────────────────────────┐
+│  逐个 URL 检查 robots.txt（带域名级缓存）            │
+│  ├── 允许 → 进入批量爬取                             │
+│  └── 禁止 → 标记 "页面反爬，robots.txt 禁止访问"     │
 └─────────────────────────────────────────────────────┘
         │
         ▼
-┌─ Step 6: AI 内容清洗 ───────────────────────────────┐
-│  6a. 截取每篇文章前 5000 字符                         │
-│  6b. 用 ===== 分隔拼接所有文章                        │
-│  6c. 一次性发送给 Qwen3-32B（批量调用，节省 API 次数）│
+┌─ Step 6: Layer 2 — 批量爬取文章 ───────────────────┐
+│  6a. WaterCrawl POST /crawl-requests/batch/          │
+│      Body: {"urls": [...], "options": {               │
+│        "include_html": true,                         │
+│        "only_main_content": false,  ← 防正文被误过滤 │
+│        "wait_time": 5000,          ← 等 JS 渲染     │
+│        "timeout": 60000                              │
+│      }}                                             │
 │                                                      │
-│  Prompt: "为每篇文章生成 200 字以内的摘要，概括核心内容"   │
+│  6b. 轮询等待 batch 任务完成（最长 600s）             │
+│  6c. 下载每篇文章的 MinIO 结果文件                    │
+│  6d. 丢失的文章标记 "链接内容爬取失败"                │
+└─────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─ Step 7: AI 内容清洗 ───────────────────────────────┐
+│  7a. 每篇截取前 5000 字符正文                        │
+│  7b. 分批（每批 10 篇）用 ===== 分隔拼接后发给 AI     │
 │                                                      │
-│  返回分隔符格式 (TTL/DTM/SRC/ABS)                     │
+│  Prompt: "为每篇文章生成 200 字以内的摘要"            │
+│  返回 TTL/DTM/SRC/ABS 分隔格式                        │
 │  解析：split("===") → 前缀匹配                        │
 │                                                      │
-│  cleaned = [{title, publish_date, source, body}, ...] │
+│  cleaned = [{title, publish_date, source, body}, ...]│
 │  (body 字段存储摘要内容)                              │
 └─────────────────────────────────────────────────────┘
         │
         ▼
-┌─ Step 7: AI 摘要 ───────────────────────────────────┐
-│  7a. 收集所有清洗后的标题                             │
-│  7b. 发送给 Qwen3-32B                                │
-│      Prompt: "根据以下 {N} 篇政府政策文章标题，       │
-│              写一个 200 字以内摘要"                   │
-│  7c. 返回一段概括性文字                               │
+┌─ Step 8: 排序截断 ──────────────────────────────────┐
+│  按 publish_date 降序排序（无日期排最后）             │
+│  截取最新 30 篇（links 与 results 保持一致）          │
 └─────────────────────────────────────────────────────┘
         │
         ▼
-┌─ Step 8: 存储结果 ──────────────────────────────────┐
+┌─ Step 9: AI 全局摘要 ───────────────────────────────┐
+│  收集所有清洗后的标题 → 发给 Qwen3-32B               │
+│  Prompt: "根据以下 N 篇政府政策文章标题，             │
+│           写一个 200 字以内摘要"                     │
+│  返回一段概括性文字                                   │
+└─────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─ Step 10: 存储结果 ─────────────────────────────────┐
 │  Redis Hash: gov_crawler:task:{task_id}              │
-│  ├── links: JSON [{title, url}, ...]    全部链接     │
+│  ├── links: JSON [{title, url}, ...]  最新 30 篇     │
 │  ├── results: JSON [{title, url, content, cleaned}]  │
 │  ├── summary: 摘要文本                               │
 │  ├── status: "finished"                              │
-│  └── progress: "全部完成: 15 篇文章 + AI 摘要"        │
+│  └── progress: "全部完成: 30 篇文章 + AI 摘要"        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -245,8 +244,18 @@ GET /api/sources
 ```json
 {
   "sources": [
-    {"name": "财政部税政司 - 政策发布", "url": "https://szs.mof.gov.cn/zhengcefabu/"},
-    {"name": "中央网信办 - 网信发布", "url": "https://www.cac.gov.cn/wxzw/wxfb/A093702index_1.htm"}
+    {
+      "key": "caizhengbu",
+      "label": "财政部税政司 - 政策发布",
+      "url": "https://szs.mof.gov.cn/zhengcefabu/",
+      "desc": "财政部税政司 / 政策发布栏目"
+    },
+    {
+      "key": "cac",
+      "label": "中央网信办 - 网信发布",
+      "url": "https://www.cac.gov.cn/wxzw/wxfb/A093702index_1.htm",
+      "desc": "中央网信办 / 网信政务 / 网信发布栏目"
+    }
   ]
 }
 ```
@@ -260,7 +269,7 @@ Content-Type: application/json
 ```
 
 ```json
-{"status": "queued", "task_id": "a1b2c3d4", "url": "..."}
+{"status": "queued", "message": "爬取任务已加入队列", "task_id": "a1b2c3d4", "url": "..."}
 ```
 
 > 入队后立即返回，不阻塞。同时可提交多个 URL，由 Worker 并发执行。
@@ -297,7 +306,7 @@ GET /api/results?task_id=a1b2c3d4
     {"title": "关于xxx的通知", "url": "https://..."},
     {"title": "关于yyy的公告", "url": "https://..."}
   ],
-  "total": 15,
+  "total": 10,
   "results": [
     {
       "title": "关于xxx的通知",
@@ -315,7 +324,12 @@ GET /api/results?task_id=a1b2c3d4
 }
 ```
 
-> `links` 返回**全部**识别到的文章链接（无 30 篇上限）；`results` 包含实际爬取了正文的**前 30 篇**。
+> `links` 与 `results` 数量一致，均为按发布日期排序后的最新 30 篇（不足 30 篇则全量）。
+
+**cleaned.body 失败标记**：
+
+- `页面反爬，robots.txt 禁止访问` — 被 robots.txt 拦截
+- `链接内容爬取失败` — WaterCrawl 爬不到（超时/丢失/反爬）
 
 ---
 
@@ -323,8 +337,8 @@ GET /api/results?task_id=a1b2c3d4
 
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
-| `WATERCRAWL_API_KEY` | **是** | — | WaterCrawl API 密钥 |
-| `WATERCRAWL_BASE_URL` | 否 | `http://10.60.151.130:7109/api/v1/core` | WaterCrawl API 地址 |
+| `WATERCRAWL_API_KEY` | **是** | — | WaterCrawl API 密钥（纯 key，不带 Bearer 前缀） |
+| `WATERCRAWL_BASE_URL` | 否 | `http://10.60.151.130:7109/api/v1/core` | WaterCrawl API 地址（必须显式配置，代码默认指向旧服务器） |
 | `GPUSTACK_API_KEY` | **是** | — | GPUStack API 密钥 |
 | `GPUSTACK_API_BASE` | 否 | `https://gpustack.stock.hnchasing.com/v1` | GPUStack API 地址 |
 | `GPUSTACK_MODEL` | 否 | `qwen3-32b` | 使用的模型名称 |
@@ -342,30 +356,31 @@ GET /api/results?task_id=a1b2c3d4
 ### 前提
 
 - Docker & Docker Compose
-- WaterCrawl 服务已在 `10.60.151.130:7109` 运行
+- WaterCrawl 服务已在目标地址:7109 运行
 - GPUStack API 已就绪
+- 服务器上已有 Redis（端口 16379）
 
 ### 步骤
 
 ```bash
 cd gov_crawler
 
-# 1. 创建环境变量文件
+# 1. 创建环境变量文件（.env 不入 git，换服务器必须重新配）
 cp .env.example .env
-nano .env  # 填入 WATERCRAWL_API_KEY 和 GPUSTACK_API_KEY
+nano .env  # 填入 WATERCRAWL_BASE_URL / WATERCRAWL_API_KEY / GPUSTACK_API_KEY
 
-# 2. 启动（连接宿主机 Redis）
-sudo docker compose up -d --build
+# 2. 启动（代码打进镜像，更新代码后必须 rebuild）
+docker compose up -d --build
 
 # 3. 验证
-sudo docker logs gov-crawler --tail 10
+docker logs gov-crawler --tail 10
 # 应看到: "已启动 3 个工作进程"
 ```
 
 ### 验证 Worker
 
 ```bash
-sudo docker logs gov-crawler | grep "Worker"
+docker logs gov-crawler | grep "Worker"
 # Worker[0] 已启动
 # Worker[1] 已启动
 # Worker[2] 已启动
@@ -379,7 +394,7 @@ sudo docker logs gov-crawler | grep "Worker"
 
 ```bash
 # 1. 启动爬取
-TASK=$(curl -s -X POST http://10.60.151.130:7107/api/crawl \
+TASK=$(curl -s -X POST http://<服务器IP>:7106/api/crawl \
   -H "Content-Type: application/json" \
   -d '{"url": "https://szs.mof.gov.cn/zhengcefabu/"}')
 TASK_ID=$(echo $TASK | python3 -c "import sys,json; print(json.load(sys.stdin)['task_id'])")
@@ -387,14 +402,14 @@ echo "task_id=$TASK_ID"
 
 # 2. 轮询等待
 while true; do
-  STATUS=$(curl -s "http://10.60.151.130:7107/api/status?task_id=$TASK_ID")
+  STATUS=$(curl -s "http://<服务器IP>:7106/api/status?task_id=$TASK_ID")
   echo $STATUS | python3 -c "import sys,json; print(json.load(sys.stdin)['progress'])"
   if echo $STATUS | grep -q "finished\|failed"; then break; fi
   sleep 2
 done
 
 # 3. 获取结果（含 links + results + summary）
-curl -s "http://10.60.151.130:7107/api/results?task_id=$TASK_ID" | python3 -m json.tool | head -50
+curl -s "http://<服务器IP>:7106/api/results?task_id=$TASK_ID" | python3 -m json.tool | head -50
 ```
 
 ### Python
@@ -403,7 +418,7 @@ curl -s "http://10.60.151.130:7107/api/results?task_id=$TASK_ID" | python3 -m js
 import time
 import requests
 
-BASE = "http://10.60.151.130:7107"
+BASE = "http://<服务器IP>:7106"
 
 # 1. 启动
 r = requests.post(f"{BASE}/api/crawl", json={"url": "https://szs.mof.gov.cn/zhengcefabu/"})
@@ -434,12 +449,22 @@ gov_crawler/
 ├── crawler.py            # 核心：WaterCrawl 客户端 + AI 识别/清洗/摘要 + TaskManager + Worker
 ├── main.py               # FastAPI 入口（5 个端点）
 ├── Dockerfile            # Python 3.12-slim
-├── docker-compose.yml    # gov-crawler + gov-redis
+├── docker-compose.yml    # gov-crawler（连接宿主机 Redis）
 ├── requirements.txt      # fastapi / uvicorn / httpx / bs4 / lxml / redis
 ├── .env.example          # 环境变量模板
 ├── .env                  # 实际配置（gitignore）
+├── HANDOVER.md           # 交接文档（部署/排障，最新准确信息以它为准）
 ├── static/
 │   └── test.html         # 前端测试页面
-├── API.md                # API 详细文档
 └── README.md             # 本文件
 ```
+
+---
+
+## 注意事项
+
+- 结果存 Redis 24h TTL（`TASK_TTL=86400`），超时后需重新爬取
+- Worker 异常会自动重启（`FIRST_EXCEPTION` 机制，检测到任一 Worker 退出后整体重启）
+- 修改代码后**必须 rebuild**（镜像 COPY 代码，非挂载卷）
+- WaterCrawl 鉴权用 `X-API-Key` 头，**不要加 Bearer 前缀**，否则 401
+- 新增站点在 `crawler.py` 的 `PRESET_SOURCES` 中添加；列表页结构不同时 AI 识别失败会自动走规则降级
