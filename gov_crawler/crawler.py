@@ -891,7 +891,7 @@ async def execute_crawl(task_id: str, url: str):
             logger.info("=== Layer 1: 爬取列表页 === task=%s", task_id)
             page = await _scrape_page(client, url)
             if page["status"] != "finished" or not page["html"]:
-                raise RuntimeError(f"列表页爬取失败: {page['status']}")
+                raise RuntimeError("列表页爬取失败: 此网站反爬，无法获取列表页内容")
             logger.info("列表页爬取成功: html_len=%d", len(page["html"]))
 
             # ---- iframe ----
