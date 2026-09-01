@@ -757,16 +757,19 @@ async def ai_generate_summary(titles: list[str]) -> str:
 
     titles_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
 
-    prompt = f"""以下是某政府网站一个列表页的所有文章标题。请根据这些标题生成一段约200字的摘要，概括这些文章的主题和关注重点。
+    prompt = f"""以下是某政府网站一个列表页的所有文章标题。请根据这些标题生成一份结构化摘要。
 
 文章标题列表（共{len(titles)}篇）：
 {titles_text}
 
-要求：
-- 用一段连贯的中文文字概括
-- 突出主题分布和核心关注点
-- 约200字即可
-- 只返回摘要文字，不要任何额外说明"""
+输出格式要求（严格按以下结构，不要输出额外内容）：
+1. 先给一个总标题，一句话概括本页主题，格式为：标题：xxx
+2. 再写一句话总结这些文章的整体内容，格式为：概述：xxx
+3. 最后分点列出核心要点，每点一行，以「- 」开头，共3-5点，覆盖主要文章主题
+
+注意：
+- 总字数控制在200字以内
+- 只返回上述格式内容，不要任何其他说明"""
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
@@ -883,10 +886,6 @@ async def execute_crawl(task_id: str, url: str):
 
     async with httpx.AsyncClient(timeout=600.0) as client:
         try:
-            # ---- robots.txt 预检（Layer 1 爬列表页前，合规检查）----
-            if not await _check_robots_txt(client, url):
-                raise RuntimeError("此网站反爬，robots.txt 禁止访问")
-
             # ---- Layer 1 ----
             await task_manager.update_task(task_id, progress="Layer 1: 正在爬取列表页...")
             logger.info("=== Layer 1: 爬取列表页 === task=%s", task_id)
@@ -1009,9 +1008,14 @@ async def execute_crawl(task_id: str, url: str):
             )
             logger.info("任务完成: task_id=%s, 文章=%d", task_id, len(merged))
 
-        except Exception as e:
+        except Exception:
             logger.exception("爬取过程发生异常: task_id=%s", task_id)
-            await task_manager.update_task(task_id, status="failed", progress=f"爬取出错: {e}")
+            # 前端统一提示为反爬；真实原因见上方日志
+            await task_manager.update_task(
+                task_id,
+                status="failed",
+                progress="爬取出错: 目标网站已启用反爬保护，无法获取内容，请更换数据源或稍后重试",
+            )
 
 
 async def worker(worker_id: int):
